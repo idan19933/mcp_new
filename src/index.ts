@@ -296,7 +296,7 @@ async function runAIAgentLoop(
   userMessage: string,
   sendUpdate: (data: any) => void
 ) {
-  if (!OPENAI_API_KEY && !ANTHROPIC_API_KEY) {
+  if (!ANTHROPIC_API_KEY && !OPENAI_API_KEY) {
     return 'AI API not configured';
   }
   
@@ -414,45 +414,44 @@ async function runAIAgentLoop(
 
   const tools: any[] = [
     {
-      type: 'function',
-      function: {
-        name: 'run_sql',
-        description: 'Execute a SELECT query to analyze data',
-        parameters: {
-          type: 'object',
-          properties: {
-            sqlQuery: { type: 'string', description: 'Complete SELECT query' }
-          },
-          required: ['sqlQuery']
-        }
+      name: 'run_sql',
+      description: 'Execute a SELECT query to analyze Clarity data. Returns JSON results.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          sqlQuery: {
+            type: 'string',
+            description: 'Complete MS SQL Server SELECT query'
+          }
+        },
+        required: ['sqlQuery']
       }
     },
     {
-      type: 'function',
-      function: {
-        name: 'get_schema',
-        description: 'Get columns for an object. Check this before writing SQL!',
-        parameters: {
-          type: 'object',
-          properties: {
-            objectCode: { type: 'string', description: 'Object code like project, task, resource' }
-          },
-          required: ['objectCode']
-        }
+      name: 'get_schema',
+      description: 'Get columns and data types for a Clarity object. Use this before writing SQL!',
+      input_schema: {
+        type: 'object',
+        properties: {
+          objectCode: {
+            type: 'string',
+            description: 'Object code like project, task, resource, etc.'
+          }
+        },
+        required: ['objectCode']
       }
     },
     {
-      type: 'function',
-      function: {
-        name: 'list_tables',
-        description: 'List all available objects and their database tables',
-        parameters: { type: 'object', properties: {} }
+      name: 'list_tables',
+      description: 'List all available Clarity objects and their database tables',
+      input_schema: {
+        type: 'object',
+        properties: {}
       }
     }
   ];
 
   let messages: any[] = [
-    { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage }
   ];
 
@@ -463,46 +462,57 @@ async function runAIAgentLoop(
     iteration++;
     sendUpdate({ type: 'thinking', data: `Processing... (${iteration}/${MAX_ITERATIONS})` });
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    // Use Anthropic API (Claude)
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENAI_API_KEY}`
+        'x-api-key': ANTHROPIC_API_KEY || OPENAI_API_KEY,
+        'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'gpt-4o',
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: systemPrompt,
         messages: messages,
-        tools: tools,
-        tool_choice: 'auto'
+        tools: tools
       })
     });
 
     const data: any = await response.json();
-    const message = data.choices[0]?.message;
-
-    if (!message) {
+    
+    if (!data.content) {
       throw new Error('Invalid AI response');
     }
 
-    if (message.tool_calls?.length > 0) {
-      messages.push(message);
+    // Check if AI wants to use tools
+    const toolUseBlocks = data.content.filter((block: any) => block.type === 'tool_use');
+    
+    if (toolUseBlocks.length > 0) {
+      // AI is using tools
+      messages.push({
+        role: 'assistant',
+        content: data.content
+      });
 
-      for (const toolCall of message.tool_calls) {
-        const functionName = toolCall.function.name;
-        const functionArgs = JSON.parse(toolCall.function.arguments);
+      const toolResults: any[] = [];
 
-        sendUpdate({ type: 'tool', data: `🔧 ${functionName}` });
+      for (const toolBlock of toolUseBlocks) {
+        const toolName = toolBlock.name;
+        const toolInput = toolBlock.input;
+
+        sendUpdate({ type: 'tool', data: `🔧 ${toolName}` });
 
         let result = '';
 
         try {
-          if (functionName === 'run_sql') {
-            result = await executeDynamicQuery(functionArgs.sqlQuery);
+          if (toolName === 'run_sql') {
+            result = await executeDynamicQuery(toolInput.sqlQuery);
           }
-          else if (functionName === 'get_schema') {
-            result = await getObjectSchema(functionArgs.objectCode);
+          else if (toolName === 'get_schema') {
+            result = await getObjectSchema(toolInput.objectCode);
           }
-          else if (functionName === 'list_tables') {
+          else if (toolName === 'list_tables') {
             const tables: string[] = [];
             clarityObjects.forEach((obj) => {
               tables.push(`${obj.objectCode}: ${obj.objectName} → ${obj.tableName}`);
@@ -513,34 +523,43 @@ async function runAIAgentLoop(
             }
           }
           else {
-            result = `Unknown tool: ${functionName}`;
+            result = `Unknown tool: ${toolName}`;
           }
 
           sendUpdate({ type: 'step', data: '✅ Completed' });
 
-          messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolBlock.id,
             content: result
           });
 
         } catch (error: any) {
           sendUpdate({ type: 'step', data: `❌ ${error.message}` });
-          messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: `Error: ${error.message}`
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolBlock.id,
+            content: `Error: ${error.message}`,
+            is_error: true
           });
         }
       }
+
+      // Add tool results to messages
+      messages.push({
+        role: 'user',
+        content: toolResults
+      });
       
       continue; // Continue loop to get AI's response
     }
 
     // No more tool calls - we have final answer
-    if (message.content) {
-      sendUpdate({ type: 'complete', data: message.content });
-      return message.content;
+    const textBlocks = data.content.filter((block: any) => block.type === 'text');
+    if (textBlocks.length > 0) {
+      const finalAnswer = textBlocks.map((block: any) => block.text).join('\n');
+      sendUpdate({ type: 'complete', data: finalAnswer });
+      return finalAnswer;
     }
     
     break;
