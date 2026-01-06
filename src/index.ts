@@ -322,15 +322,15 @@ Page context: ${JSON.stringify(context)}`;
         })
       });
 
-      const data = await response.json();
+      const data: any = await response.json();
       
       if (!data.choices || !data.choices[0]) {
         console.error('[OpenAI Error]:', data);
         throw new Error('Invalid OpenAI response');
       }
       
-      const choice = data.choices[0];
-      const message = choice.message;
+      const choice: any = data.choices[0];
+      const message: any = choice.message;
 
       if (message.tool_calls && message.tool_calls.length > 0) {
         console.log(`[Agent calling ${message.tool_calls.length} tool(s)]`);
