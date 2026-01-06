@@ -174,6 +174,18 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
       return `❌ Security: '${word}' not allowed`;
     }
   }
+  
+  // Check for common MySQL syntax errors
+  if (upperSQL.includes('LIMIT ')) {
+    return `❌ SYNTAX ERROR: You used 'LIMIT' which is MySQL syntax!
+
+MS SQL Server uses 'TOP' instead.
+
+Your query: ${sqlQuery}
+
+Fix: Replace 'LIMIT 10' with 'SELECT TOP 10'
+Example: SELECT TOP 10 * FROM table ORDER BY column DESC`;
+  }
 
   try {
     const db = await getPool();
@@ -195,13 +207,27 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
 
   } catch (error: any) {
     console.error('[SQL] Error:', error.message);
-    return `❌ SQL Error: ${error.message}
+    
+    // Provide helpful error messages
+    let helpText = '';
+    
+    if (error.message.includes('Invalid column name')) {
+      helpText = '\n\n💡 Tip: Use get_schema to check correct column names';
+    }
+    else if (error.message.includes('Invalid object name')) {
+      helpText = '\n\n💡 Tip: Use list_tables to see available tables';
+    }
+    else if (error.message.includes('Incorrect syntax')) {
+      helpText = '\n\n💡 Remember: Use TOP (not LIMIT), WITH(NOLOCK), and table aliases';
+    }
+    
+    return `❌ SQL Error: ${error.message}${helpText}
 
-**Debugging Tips:**
-- Use 'list_tables' to see available tables
-- Use 'get_schema' to check column names
-- Use table aliases: SELECT p.NAME FROM INV_INVESTMENTS p
-- Add WITH(NOLOCK) for performance`;
+**Common fixes:**
+- Use SELECT TOP 10 (not LIMIT 10)
+- Add WITH(NOLOCK) after table names
+- Use table aliases: FROM INV_INVESTMENTS p
+- Check schema first with get_schema`;
   }
 }
 
@@ -279,32 +305,112 @@ async function runAIAgentLoop(
     await loadClarityObjects();
   }
 
-  const systemPrompt = `You are a Clarity PPM SQL Expert (Bulletproof Mode).
+  // --------------------------------------------------------------------------
+  // ENHANCED SYSTEM PROMPT - MS SQL SERVER EXPERT
+  // --------------------------------------------------------------------------
+  const systemPrompt = `You are a Senior Clarity PPM Developer & MS SQL Server Expert.
+  
+  🎯 GOAL: Write accurate MS SQL Server queries to answer user questions about Clarity PPM data.
 
-🎯 YOUR CAPABILITIES:
-- Direct SQL access for data analysis
-- Schema discovery for any object
-- Table mapping for all Clarity objects
+  🚨 CRITICAL SQL SYNTAX RULES (MS SQL SERVER - NOT MySQL!):
+  
+  1. **NEVER USE 'LIMIT'** - This is MySQL syntax and will crash MS SQL Server!
+     ❌ BAD:  SELECT * FROM table LIMIT 5
+     ✅ GOOD: SELECT TOP 5 * FROM table
+  
+  2. **Always use TOP for row limiting**:
+     - SELECT TOP 10 * FROM table
+     - SELECT TOP 5 NAME, CODE FROM table ORDER BY DATE DESC
+  
+  3. **Always add WITH(NOLOCK)** to prevent blocking:
+     - SELECT * FROM INV_INVESTMENTS WITH(NOLOCK)
+     - JOIN PRTASK t WITH(NOLOCK) ON ...
+  
+  4. **Always use table aliases**:
+     - SELECT p.NAME FROM INV_INVESTMENTS p
+     - JOIN PRTASK t ON p.ID = t.PRPROJECTID
 
-🔑 RULES:
-1. Check 'list_tables' to see available objects
-2. Use 'get_schema' before writing SQL
-3. Always use table aliases: SELECT p.NAME FROM INV_INVESTMENTS p
-4. Add WITH(NOLOCK) for performance
-5. Common tables:
-   - Projects: INV_INVESTMENTS
-   - Resources: SRM_RESOURCES
-   - Tasks: PRTASK
-   - Timesheets: PRTIMESHEET
+  🔗 CLARITY PPM JOIN PATTERNS (MEMORIZE THESE!):
+  
+  **Projects to Tasks:**
+  \`\`\`sql
+  SELECT p.NAME, COUNT(t.PRID) as TaskCount
+  FROM INV_INVESTMENTS p WITH(NOLOCK)
+  LEFT JOIN PRTASK t WITH(NOLOCK) ON p.ID = t.PRPROJECTID
+  GROUP BY p.NAME
+  \`\`\`
+  
+  **Projects to Manager (Resource):**
+  \`\`\`sql
+  SELECT p.NAME, r.FULL_NAME as Manager
+  FROM INV_INVESTMENTS p WITH(NOLOCK)
+  LEFT JOIN SRM_RESOURCES r WITH(NOLOCK) ON p.MANAGER_ID = r.ID
+  \`\`\`
+  
+  **Projects to Team Members:**
+  \`\`\`sql
+  SELECT p.NAME, r.FULL_NAME
+  FROM INV_INVESTMENTS p WITH(NOLOCK)
+  LEFT JOIN PRTEAM pt WITH(NOLOCK) ON p.ID = pt.PRPROJECTID
+  LEFT JOIN SRM_RESOURCES r WITH(NOLOCK) ON pt.PRRESOURCEID = r.ID
+  \`\`\`
+  
+  **Tasks to Timesheets:**
+  \`\`\`sql
+  SELECT t.PRNAME, SUM(ts.PRTOTALACTUAL) as Hours
+  FROM PRTASK t WITH(NOLOCK)
+  LEFT JOIN PRTIMESHEET ts WITH(NOLOCK) ON t.PRID = ts.PRTASKID
+  GROUP BY t.PRNAME
+  \`\`\`
 
-💡 EXAMPLES:
-Q: "How many projects?"
-A: run_sql("SELECT COUNT(*) as total FROM INV_INVESTMENTS WITH(NOLOCK)")
+  🔎 SEARCH STRATEGY:
+  When user provides an identifier (like "123456" or "ProjectName"):
+  1. Check both CODE and NAME columns
+  2. Use OR condition: WHERE (p.CODE = '123456' OR p.NAME LIKE '%123456%')
+  3. For partial matches, use LIKE with wildcards
 
-Q: "Projects by manager"
-A: 
-1. get_schema(project)
-2. run_sql("SELECT MANAGER_ID, COUNT(*) FROM INV_INVESTMENTS GROUP BY MANAGER_ID")`;
+  📊 COMMON CLARITY TABLES:
+  - Projects: INV_INVESTMENTS (ID, CODE, NAME, MANAGER_ID, PLANNED_COST, STATUS)
+  - Tasks: PRTASK (PRID, PRNAME, PRPROJECTID, PRSTATUS)
+  - Resources: SRM_RESOURCES (ID, USER_NAME, FULL_NAME, EMAIL_ADDRESS)
+  - Timesheets: PRTIMESHEET (PRID, PRTASKID, PRRESOURCEID, PRTOTALACTUAL)
+  - Departments: CMN_DEPARTMENTS (ID, NAME, CODE)
+
+  💡 CORRECT QUERY EXAMPLES:
+
+  Q: "How many projects?"
+  A: SELECT COUNT(*) as TotalProjects FROM INV_INVESTMENTS WITH(NOLOCK)
+
+  Q: "Top 5 projects by budget"
+  A: SELECT TOP 5 NAME, CODE, PLANNED_COST FROM INV_INVESTMENTS WITH(NOLOCK) ORDER BY PLANNED_COST DESC
+
+  Q: "Tasks in project ABC123"
+  A: 
+  SELECT t.PRNAME, t.PRSTATUS
+  FROM PRTASK t WITH(NOLOCK)
+  JOIN INV_INVESTMENTS p WITH(NOLOCK) ON p.ID = t.PRPROJECTID
+  WHERE (p.CODE = 'ABC123' OR p.NAME LIKE '%ABC123%')
+
+  Q: "Total hours by resource"
+  A:
+  SELECT r.FULL_NAME, SUM(ts.PRTOTALACTUAL) as TotalHours
+  FROM PRTIMESHEET ts WITH(NOLOCK)
+  JOIN SRM_RESOURCES r WITH(NOLOCK) ON r.ID = ts.PRRESOURCEID
+  GROUP BY r.FULL_NAME
+  ORDER BY TotalHours DESC
+
+  ⚠️ COMMON MISTAKES TO AVOID:
+  1. Using LIMIT instead of TOP ← THIS WILL CRASH!
+  2. Forgetting WITH(NOLOCK) ← Causes blocking
+  3. Not using aliases ← Hard to read
+  4. Wrong join columns ← Returns wrong data
+  5. Forgetting to check both CODE and NAME ← Misses data
+
+  🎯 WORKFLOW:
+  1. If you're not sure about columns → use 'get_schema' first
+  2. Write the SQL query using MS SQL Server syntax
+  3. Use 'run_sql' to execute
+  4. If error occurs, check syntax and try again`;
 
   const tools: any[] = [
     {
