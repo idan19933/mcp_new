@@ -247,28 +247,54 @@ async function getUserPermissions(userId: string): Promise<UserSession['permissi
   }
 }
 
-// Extract user from session
-async function getUserFromSession(cookies: string): Promise<string | null> {
+// Extract user from session or credentials
+async function getUserFromSession(session: any): Promise<string | null> {
   try {
-    const sessionMatch = cookies.match(/JSESSIONID=([^;]+)/);
-    if (!sessionMatch) return null;
+    // Method 1: Try username/password authentication
+    if (session?.username && session?.password) {
+      console.log('[Auth] Authenticating with username/password:', session.username);
+      
+      const db = await getPool();
+      const result = await db.request()
+        .input('username', session.username)
+        .query(`
+          SELECT TOP 1 USER_ID, USER_NAME
+          FROM CMN_SEC_USERS
+          WHERE USER_NAME = @username
+          AND IS_ACTIVE = 1
+        `);
 
-    const sessionId = sessionMatch[1];
-    const db = await getPool();
-    
-    const result = await db.request()
-      .input('sessionId', sessionId)
-      .query(`
-        SELECT TOP 1 u.USER_ID, u.USER_NAME
-        FROM CMN_SEC_USERS u
-        INNER JOIN CMN_SEC_USER_SESSIONS s ON s.USER_ID = u.USER_ID
-        WHERE s.SESSION_ID = @sessionId
-        AND s.LAST_UPDATED_DATE > DATEADD(hour, -24, GETDATE())
-      `);
+      if (result.recordset.length > 0) {
+        console.log('[Auth] ✅ User found:', result.recordset[0].USER_NAME);
+        return result.recordset[0].USER_ID;
+      } else {
+        console.warn('[Auth] ❌ User not found:', session.username);
+        return null;
+      }
+    }
 
-    if (result.recordset.length > 0) {
-      console.log('[Auth] ✅ User:', result.recordset[0].USER_NAME);
-      return result.recordset[0].USER_ID;
+    // Method 2: Try session cookies
+    if (session?.cookies) {
+      const sessionMatch = session.cookies.match(/JSESSIONID=([^;]+)/);
+      if (!sessionMatch) return null;
+
+      const sessionId = sessionMatch[1];
+      const db = await getPool();
+      
+      const result = await db.request()
+        .input('sessionId', sessionId)
+        .query(`
+          SELECT TOP 1 u.USER_ID, u.USER_NAME
+          FROM CMN_SEC_USERS u
+          INNER JOIN CMN_SEC_USER_SESSIONS s ON s.USER_ID = u.USER_ID
+          WHERE s.SESSION_ID = @sessionId
+          AND s.LAST_UPDATED_DATE > DATEADD(hour, -24, GETDATE())
+        `);
+
+      if (result.recordset.length > 0) {
+        console.log('[Auth] ✅ User:', result.recordset[0].USER_NAME);
+        return result.recordset[0].USER_ID;
+      }
     }
 
     return null;
@@ -851,8 +877,8 @@ async function startHTTPServer() {
     try {
       let userSession: UserSession | null = null;
 
-      if (session?.cookies) {
-        const userId = await getUserFromSession(session.cookies);
+      if (session) {
+        const userId = await getUserFromSession(session);
         
         if (userId) {
           const permissions = await getUserPermissions(userId);
@@ -862,13 +888,15 @@ async function startHTTPServer() {
           
           userSession = {
             userId,
-            userName: context.userName || 'User',
-            cookies: session.cookies,
+            userName: context.userName || session.username || 'User',
+            cookies: session.cookies || '',
             permissions,
             isAdmin
           };
 
           sendUpdate({ type: 'info', data: `🔐 ${userSession.userName} (${permissions.size} objects)` });
+        } else {
+          sendUpdate({ type: 'warning', data: '⚠️ Authentication failed - limited access' });
         }
       }
 
