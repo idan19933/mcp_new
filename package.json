@@ -5,37 +5,24 @@
   "main": "dist/index.js",
   "type": "module",
   "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=9.0.0"
+    "node": ">=20.0.0"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc",
+    "build": "tsc --skipLibCheck",
     "start": "node dist/index.js",
-    "watch": "tsc --watch",
-    "clean": "rm -rf dist"
+    "watch": "tsc --watch"
   },
-  "keywords": [
-    "clarity",
-    "ppm",
-    "mcp",
-    "ai",
-    "sql"
-  ],
-  "author": "Your Name",
-  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.5.0",
     "mssql": "^10.0.0",
     "express": "^4.18.2",
-    "cors": "^2.8.5",
     "dotenv": "^16.3.1"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/express": "^4.17.21",
     "@types/mssql": "^9.1.0",
-    "@types/cors": "^2.8.17",
     "typescript": "^5.3.3",
     "tsx": "^4.7.0"
   }
