@@ -560,7 +560,63 @@ Error details: ${error.originalError?.info?.message || error.message}`;
 }
 
 // ============================================================================
-// AI AGENT WITH SCHEMA DISCOVERY
+// DYNAMIC SQL ENGINE (Read-Only) - The Power Feature!
+// ============================================================================
+async function executeDynamicQuery(sqlQuery: string, session: UserSession | null): Promise<string> {
+  // Security: Block destructive operations
+  const forbidden = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE', 'EXEC', 'EXECUTE'];
+  const upperSQL = sqlQuery.toUpperCase().trim();
+  
+  // Must start with SELECT or WITH (for CTEs)
+  if (!upperSQL.startsWith('SELECT') && !upperSQL.startsWith('WITH')) {
+    return '❌ Security Error: Only SELECT queries are allowed in dynamic mode.';
+  }
+
+  // Check for forbidden keywords
+  for (const word of forbidden) {
+    if (upperSQL.includes(` ${word} `) || upperSQL.includes(`\n${word} `) || upperSQL.includes(`\t${word} `)) {
+      return `❌ Security Error: Destructive command '${word}' not allowed. Use generic_crud for modifications.`;
+    }
+  }
+
+  try {
+    const db = await getPool();
+    console.log(`[Dynamic SQL] Executing:\n${sqlQuery}`);
+    
+    const result = await db.request().query(sqlQuery);
+    
+    if (result.recordset.length === 0) {
+      return 'Query executed successfully but returned no results.';
+    }
+    
+    if (result.recordset.length > 100) {
+      return JSON.stringify(result.recordset.slice(0, 100), null, 2) + 
+             `\n\n... (${result.recordset.length} total rows, showing first 100)`;
+    }
+    
+    return JSON.stringify(result.recordset, null, 2);
+
+  } catch (error: any) {
+    console.error('[Dynamic SQL] Error:', error);
+    return `❌ SQL Error: ${error.message}
+
+**Debugging Tips:**
+1. Check table names with 'list_objects'
+2. Check column names with 'get_schema'
+3. Use table aliases (e.g., SELECT p.NAME FROM INV_INVESTMENTS p)
+4. Common tables:
+   - Projects: INV_INVESTMENTS
+   - Tasks: PRTASK
+   - Resources: SRM_RESOURCES
+   - Lookups: CMN_LOOKUPS_V
+
+Original Query:
+${sqlQuery}`;
+  }
+}
+
+// ============================================================================
+// AI AGENT WITH DYNAMIC SQL
 // ============================================================================
 async function runAIAgentLoop(
   userMessage: string,
@@ -574,37 +630,106 @@ async function runAIAgentLoop(
 
   await loadClarityObjects();
 
-  // Enhanced system prompt with schema discovery instructions
-  let systemPrompt = `You are a Clarity PPM Expert with direct database access to ALL Clarity objects.
+  // Enhanced system prompt with dynamic SQL instructions
+  let systemPrompt = `You are a Clarity PPM Expert & SQL Data Analyst with direct database access.
 
-🔑 CRITICAL RULES FOR SUCCESS:
-1. **ALWAYS check schema first**: Before creating or updating ANY record, use 'get_schema' tool to see the exact column names
-2. **SQL errors are learning opportunities**: If you get a "Invalid column name" error, use 'get_schema' and try again with correct names
-3. **Use generic_crud for everything**: Don't guess - this tool works for ANY Clarity object
-4. **Current page context**: ${JSON.stringify(context)}
+🎯 YOUR CAPABILITIES:
+1. **Data Analysis & Complex Queries** (Use run_read_only_sql):
+   - "How many active projects?"
+   - "Total budget by department"
+   - "Top 5 projects over budget"
+   - "List resources with >100 hours this month"
+   → Write SQL queries yourself!
 
-Available capabilities:
-- get_schema: See exact database columns for any object (USE THIS FIRST!)
-- list_objects: See all available objects you can work with  
-- get_current_page_details: Get full details of current page object
-- generic_crud: Read/Create/Update/Delete ANY Clarity object
+2. **Simple CRUD** (Use generic_crud):
+   - Create single records
+   - Update specific fields
+   - Delete records
+   → Safer for modifications
 
-WORKFLOW EXAMPLE:
-User: "Create a project named Alpha"
-1. Call: get_schema(objectCode="project") 
-2. See that columns are: UNIQUE_NAME, NAME, PR_START_DATE (not code, name, start_date!)
-3. Call: generic_crud(action="create", objectCode="project", data={UNIQUE_NAME:"alpha", NAME:"Alpha Project"})
-`;
+3. **Schema Discovery** (Use get_schema):
+   - ALWAYS check schema before writing SQL
+   - Get correct column names
+   - Understand data types
+
+🔑 SQL WRITING RULES:
+1. **Check schema first**: Use get_schema before writing queries
+2. **Use aliases**: SELECT p.name FROM INV_INVESTMENTS p (not SELECT name FROM INV_INVESTMENTS)
+3. **Add NOLOCK**: Use WITH(NOLOCK) for performance
+4. **Date functions**: GETDATE(), DATEADD(day, -7, GETDATE()), DATEDIFF(day, start, end)
+5. **Common aggregations**: COUNT(*), SUM(amount), AVG(cost), MAX(date), MIN(value)
+6. **Joins**: Use proper JOIN syntax with table aliases
+7. **NULL handling**: Use ISNULL(column, 0) or COALESCE(column, default)
+
+📊 COMMON CLARITY TABLES:
+- Projects/Ideas: INV_INVESTMENTS (columns: NAME, CODE, UNIQUE_NAME, MANAGER_ID, PR_START_DATE, PLANNED_COST)
+- Tasks: PRTASK (columns: PRNAME, PRPROJECTID, PRSTATUS, PRASSIGNMENTTYPE)
+- Resources: SRM_RESOURCES (columns: USER_NAME, FULL_NAME, RESOURCE_ID, EMAIL_ADDRESS)
+- Timesheets: PRTIMESHEET (columns: PRRESOURCEID, PRTASKID, PRTOTALACTUAL)
+- Lookups: CMN_LOOKUPS_V (for status/type descriptions)
+
+🔐 Current Context:
+- Page: ${context.pageType} ${context.objectId ? `(ID: ${context.objectId})` : ''}
+- URL: ${context.url}`;
 
   if (session) {
     const permsCount = session.permissions.size;
-    systemPrompt += `\n\n🔐 Authentication: ${session.userName}
-You have access to ${permsCount} objects.
-${session.isAdmin ? '✅ You have ADMIN rights - full access!' : '⚠️ Regular user - permissions are checked automatically'}`;
+    systemPrompt += `
+- User: ${session.userName}
+- Access: ${session.isAdmin ? '🔑 ADMIN (full access)' : `${permsCount} objects`}`;
+  } else {
+    systemPrompt += `
+- Access: Limited (not authenticated)`;
   }
 
-  // Generate compact tool definitions
+  systemPrompt += `
+
+💡 EXAMPLES:
+
+Q: "How many active projects?"
+A: 
+1. get_schema(project) → see IS_ACTIVE column
+2. run_read_only_sql("SELECT COUNT(*) as total FROM INV_INVESTMENTS WITH(NOLOCK) WHERE IS_ACTIVE = 1")
+
+Q: "Total budget by manager"
+A:
+1. get_schema(project) → see MANAGER_ID, PLANNED_COST
+2. run_read_only_sql("
+   SELECT 
+     r.FULL_NAME as Manager,
+     COUNT(*) as Projects,
+     SUM(p.PLANNED_COST) as TotalBudget
+   FROM INV_INVESTMENTS p WITH(NOLOCK)
+   JOIN SRM_RESOURCES r WITH(NOLOCK) ON r.ID = p.MANAGER_ID
+   WHERE p.IS_ACTIVE = 1
+   GROUP BY r.FULL_NAME
+   ORDER BY TotalBudget DESC
+")
+
+Q: "Update project status"
+A: generic_crud(action="update", objectCode="project", id="...", data={STATUS: "Active"})
+
+**Remember**: Dynamic SQL for analysis, generic_crud for modifications!`;
+
+  // Enhanced tool definitions with dynamic SQL
   const tools: any[] = [
+    {
+      type: 'function',
+      function: {
+        name: 'run_read_only_sql',
+        description: 'Execute a raw SELECT SQL query for complex data analysis (aggregations, joins, filtering). Use this for "How many...", "Total...", "List projects where...", etc. CRITICAL: Check schema first!',
+        parameters: {
+          type: 'object',
+          properties: {
+            sqlQuery: {
+              type: 'string',
+              description: 'Complete MS SQL Server SELECT query. Must include table aliases and WITH(NOLOCK) hints for performance.'
+            }
+          },
+          required: ['sqlQuery']
+        }
+      }
+    },
     {
       type: 'function',
       function: {
@@ -721,7 +846,10 @@ ${session.isAdmin ? '✅ You have ADMIN rights - full access!' : '⚠️ Regular
           try {
             let result = '';
 
-            if (functionName === 'get_schema') {
+            if (functionName === 'run_read_only_sql') {
+              result = await executeDynamicQuery(functionArgs.sqlQuery, session);
+            }
+            else if (functionName === 'get_schema') {
               result = await getObjectSchema(functionArgs.objectCode);
             }
             else if (functionName === 'list_objects') {
