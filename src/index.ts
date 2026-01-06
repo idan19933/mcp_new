@@ -8,21 +8,19 @@ import https from 'https';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v5.2 - CONNECTIVITY FIX EDITION");
+console.log("🚀 CLARITY MCP v5.4 - LEARNER EDITION (Real API Routes)");
 console.log("==========================================================");
 
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-
-// Increased timeouts for slower internal networks
 const DB_CONFIG = {
   user: process.env.DB_USER || 'niku',
   password: process.env.DB_PASSWORD || 'niku',
   server: process.env.DB_SERVER || '16.16.83.171',
   database: process.env.DB_NAME || 'niku',
-  requestTimeout: 60000, // 60s timeout
+  requestTimeout: 60000,
   options: {
     encrypt: false,
     trustServerCertificate: true,
@@ -32,36 +30,22 @@ const DB_CONFIG = {
 };
 
 const CLARITY_BASE_URL = process.env.CLARITY_URL || `http://${DB_CONFIG.server}:8080`; 
-
-// SSL Agent to bypass "self-signed certificate" errors
-const insecureAgent = new https.Agent({
-  rejectUnauthorized: false
-});
+const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // ============================================================================
-// EXPANDED TABLE MAP
+// TABLE MAP
 // ============================================================================
 const TABLE_MAP: Record<string, string> = {
   'PROJECT': 'INV_INVESTMENTS',
   'IDEA': 'INV_INVESTMENTS',
   'INVESTMENT': 'INV_INVESTMENTS',
-  'RESOURCE': 'SRM_RESOURCES',
   'TASK': 'PRTASK',
-  'ASSIGNMENT': 'PRASSIGNMENT',
+  'RESOURCE': 'SRM_RESOURCES',
   'TEAM': 'PRTEAM',
   'TIMESHEET': 'PRTIMESHEET',
-  'TIMESLICE': 'PRTIMESLICE',
-  'ROLE': 'SRM_RESOURCES',
   'RISK': 'RIM_RISKS',
   'ISSUE': 'RIM_ISSUES',
-  'CHANGE': 'RIM_RISKS',
-  'STATUS_REPORT': 'COP_PRJ_STATUSRPT',
-  'FINANCIAL_PLAN': 'FIN_PLANS',
-  'COST_PLAN': 'FIN_COST_PLAN_DETAILS',
   'DEPARTMENT': 'CMN_DEPARTMENTS',
-  'LOCATION': 'CMN_LOCATIONS',
-  'OBS_UNIT': 'PRJ_OBS_UNITS',
-  'PROCESS': 'BPM_DEF_PROCESSES',
   'LOOKUP': 'CMN_LOOKUPS_V',
   'USER': 'CMN_SEC_USERS',
   'VENDOR': 'ODF_CA_VENDOR',
@@ -69,7 +53,7 @@ const TABLE_MAP: Record<string, string> = {
 };
 
 // ============================================================================
-// DATABASE CONNECTION
+// DATABASE
 // ============================================================================
 let pool: sql.ConnectionPool | null = null;
 
@@ -89,10 +73,10 @@ async function getPool() {
 // ============================================================================
 // OBJECT LOADING
 // ============================================================================
-interface ClarityObject {
-  objectCode: string;
-  objectName: string;
-  tableName: string;
+interface ClarityObject { 
+  objectCode: string; 
+  objectName: string; 
+  tableName: string; 
 }
 
 let clarityObjects: Map<string, ClarityObject> = new Map();
@@ -101,57 +85,47 @@ async function loadClarityObjects() {
   console.log('[Objects] Building object map...');
   try {
     const db = await getPool();
-    try {
-      const result = await db.request().query("SELECT code, name FROM ODF_OBJECTS WHERE is_active = 1");
-      result.recordset.forEach((obj: any) => {
-        const code = (obj.code || '').toUpperCase();
-        const name = obj.name || code;
-        if (!code) return;
-        let tableName = TABLE_MAP[code] || `ODF_CA_${code}`;
-        clarityObjects.set(code, { objectCode: code, objectName: name, tableName: tableName });
+    const result = await db.request().query("SELECT code, name FROM ODF_OBJECTS WHERE is_active = 1");
+    result.recordset.forEach((obj: any) => {
+      const code = (obj.code || '').toUpperCase();
+      if (!code) return;
+      let tableName = TABLE_MAP[code] || `ODF_CA_${code}`;
+      clarityObjects.set(code, { 
+        objectCode: code, 
+        objectName: obj.name || code, 
+        tableName 
       });
-      console.log(`✅ [Objects] Mapped ${clarityObjects.size} objects from DB`);
-    } catch (dbErr: any) {
-      console.warn('⚠️ [Objects] ODF_OBJECTS query failed. Using hardcoded map.');
-      throw dbErr;
-    }
-  } catch (error: any) {
-    // Fallback
-    Object.entries(TABLE_MAP).forEach(([code, table]) => {
-      clarityObjects.set(code, { objectCode: code, objectName: code, tableName: table });
     });
-    console.log(`✅ [Objects] Fallback loaded ${clarityObjects.size} objects`);
+    console.log(`✅ [Objects] Mapped ${clarityObjects.size} objects`);
+  } catch (error) {
+    console.warn('⚠️ [Objects] Using hardcoded map.');
+    Object.entries(TABLE_MAP).forEach(([k, v]) => {
+      clarityObjects.set(k, { objectCode: k, objectName: k, tableName: v });
+    });
   }
 }
 
 // ============================================================================
-// HELPER: SMART COOKIE CLEANER
+// SMART COOKIE FORMATTER
 // ============================================================================
 function formatSessionCookie(rawValue: any): string | null {
   if (!rawValue) return null;
   let val = String(rawValue).trim();
 
-  console.log(`[Cookie] Raw input: ${val.substring(0, 30)}...`);
+  console.log(`[Cookie] Raw: ${val.substring(0, 30)}...`);
 
-  // 1. If it already looks like "JSESSIONID=...", extract the ID part
   if (val.includes('JSESSIONID=')) {
     const match = val.match(/JSESSIONID=([^;]+)/);
-    if (match) {
-      val = match[1];
-      console.log(`[Cookie] Extracted from JSESSIONID=: ${val.substring(0, 20)}...`);
-    }
+    if (match) val = match[1];
   }
-  // 2. If it looks like "sessionId=...", strip that
   else if (val.startsWith('sessionId=')) {
     val = val.replace('sessionId=', '');
-    console.log(`[Cookie] Stripped sessionId=: ${val.substring(0, 20)}...`);
   }
 
-  // 3. Clean any remaining weird chars
   val = val.replace(/['";]/g, '');
 
   const formatted = `JSESSIONID=${val}`;
-  console.log(`[Cookie] Final formatted: ${formatted.substring(0, 30)}...`);
+  console.log(`[Cookie] Formatted: ${formatted.substring(0, 30)}...`);
   
   return formatted;
 }
@@ -166,11 +140,13 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
   if (!upperSQL.startsWith('SELECT') && !upperSQL.startsWith('WITH')) {
     return '❌ Security: Only SELECT queries allowed.';
   }
+  
   if (forbidden.some(w => upperSQL.includes(` ${w} `))) {
     return '❌ Security: Forbidden keyword detected.';
   }
+  
   if (upperSQL.includes('LIMIT ')) {
-    return `❌ SYNTAX ERROR: Use 'TOP n' instead of 'LIMIT n'.`;
+    return `❌ SYNTAX: Use 'TOP n' instead of 'LIMIT n'.`;
   }
 
   try {
@@ -178,44 +154,20 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
     console.log(`[SQL-READ] ${sqlQuery}`);
     const result = await db.request().query(sqlQuery);
     
-    if (result.recordset.length === 0) return 'Query executed. No results found.';
-    if (result.recordset.length > 100) {
-      return JSON.stringify(result.recordset.slice(0, 100), null, 2) + 
-             `\n\n... (${result.recordset.length} total)`;
+    if (result.recordset.length === 0) {
+      return 'Query executed. No results found.';
     }
-    return JSON.stringify(result.recordset, null, 2);
+    
+    // Return up to 100 rows
+    return JSON.stringify(result.recordset.slice(0, 100), null, 2);
   } catch (error: any) {
+    console.error(`[SQL Error] ${error.message}`);
     return `❌ SQL Error: ${error.message}`;
   }
 }
 
 // ============================================================================
-// TOOL 2: CUSTOM OBJECT UPDATE
-// ============================================================================
-async function executeCustomObjectUpdate(sqlQuery: string): Promise<string> {
-  const upperSQL = sqlQuery.toUpperCase().trim();
-  
-  if (!upperSQL.startsWith('UPDATE') && !upperSQL.startsWith('INSERT')) {
-    return '❌ Security: Only UPDATE/INSERT allowed.';
-  }
-  
-  const targetTableMatch = upperSQL.match(/(UPDATE|INTO)\s+(ODF_CA_\w+)/);
-  if (!targetTableMatch) {
-    return '❌ Security: Only ODF_CA_* tables allowed.';
-  }
-
-  try {
-    const db = await getPool();
-    console.log(`[SQL-WRITE] ${sqlQuery}`);
-    const result = await db.request().query(sqlQuery);
-    return `✅ Success: ${result.rowsAffected[0]} rows affected.`;
-  } catch (error: any) {
-    return `❌ SQL Error: ${error.message}`;
-  }
-}
-
-// ============================================================================
-// TOOL 3: REST API CALLER (Robust + SSL Bypass)
+// TOOL 2: REST API (WITH "ID FIRST" LOGIC)
 // ============================================================================
 async function callClarityREST(
   method: string, 
@@ -224,14 +176,14 @@ async function callClarityREST(
   sessionCookie: string | null
 ): Promise<string> {
   if (!sessionCookie) {
-    return '❌ Error: No Active Session. Please login via Extension.';
+    return '❌ Error: No Active Session. Please log in via Extension.';
   }
 
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   const url = `${CLARITY_BASE_URL}${cleanEndpoint}`;
 
   console.log(`[REST] ${method} ${url}`);
-  console.log(`[REST] Cookie: ${sessionCookie.substring(0, 35)}...`);
+  if (body) console.log(`[REST] Body:`, JSON.stringify(body, null, 2));
 
   try {
     const fetchOptions: any = {
@@ -244,7 +196,6 @@ async function callClarityREST(
       body: body ? JSON.stringify(body) : undefined
     };
 
-    // Add SSL bypass agent for HTTPS
     if (url.startsWith('https')) {
       fetchOptions.agent = insecureAgent;
     }
@@ -252,11 +203,11 @@ async function callClarityREST(
     const response = await fetch(url, fetchOptions);
     const text = await response.text();
     
-    console.log(`[REST] Response Status: ${response.status}`);
+    console.log(`[REST] Status: ${response.status}`);
     
     if (!response.ok) {
-       console.error(`[REST Error] ${response.status}: ${text.substring(0, 200)}`);
-       return `❌ API Error (${response.status}): ${text.substring(0, 300)}`;
+      console.error(`[REST Error] ${response.status}: ${text.substring(0, 300)}`);
+      return `❌ API Error (${response.status}): ${text.substring(0, 400)}`;
     }
 
     try {
@@ -272,117 +223,103 @@ async function callClarityREST(
 
 **Troubleshooting:**
 - Check URL: ${url}
-- Verify VPN/Network access
-- Ensure Clarity server is running
-- Check firewall settings`;
+- Verify network/VPN access
+- Ensure Clarity server is running`;
   }
 }
 
 // ============================================================================
-// TOOL 4: SCHEMA HELPER
-// ============================================================================
-async function getObjectSchema(objectCode: string): Promise<string> {
-  const obj = clarityObjects.get(objectCode.toUpperCase());
-  if (!obj) return `Object '${objectCode}' not found.`;
-  
-  try {
-    const db = await getPool();
-    const q = `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE 
-               FROM INFORMATION_SCHEMA.COLUMNS 
-               WHERE TABLE_NAME = '${obj.tableName}' 
-               ORDER BY ORDINAL_POSITION`;
-    const res = await db.request().query(q);
-    
-    return JSON.stringify({ 
-      object: obj.objectName, 
-      table: obj.tableName, 
-      columns: res.recordset 
-    }, null, 2);
-  } catch (e: any) { 
-    return `Error: ${e.message}`; 
-  }
-}
-
-// ============================================================================
-// AI AGENT LOOP (GPT-4o)
+// AI AGENT LOOP (LEARNER BRAIN - ID FIRST!)
 // ============================================================================
 async function runAIAgentLoop(
   userMessage: string, 
-  sessionCookie: string | null,
+  sessionCookie: string | null, 
   sendUpdate: (data: any) => void
 ) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
   if (clarityObjects.size === 0) await loadClarityObjects();
 
-  const systemPrompt = `You are a Clarity PPM Architect.
+  const systemPrompt = `You are a Clarity PPM Developer who learns from real API behavior.
 
-🎯 GOAL: Manage Clarity data using SQL (Read) and REST (Write).
+🚨 THE GOLDEN RULE OF CLARITY REST API:
+**You CANNOT use String Codes (e.g. 'this_proj', 'PRJ123') in REST URL paths.**
+**You MUST use Internal Numeric IDs (e.g. 5004001).**
 
-⚠️ RULES:
-1. **SQL Read**: Use 'run_read_sql' for ALL queries. Always use WITH(NOLOCK) and TOP (not LIMIT).
-2. **SQL Write**: ONLY for Custom Objects (ODF_CA_*) using 'run_custom_sql_update'.
-3. **REST Write**: For System Objects (Tasks, Projects), use 'call_rest_api'.
+This is the #1 cause of 404 errors in Clarity!
 
-🔗 REST API STRATEGY:
-- **Create Task**: POST /ppm/rest/v1/tasks
-  Body: { "code": "TASK001", "name": "Task Name", "projectCode": "PRJ123", "status": "NOT_STARTED" }
-  
-- **Create Project**: POST /ppm/rest/v1/projects
-  Body: { "code": "PRJ001", "name": "Project Name", "managerUserName": "admin" }
+✅ CORRECT WORKFLOW - "ID First" Pattern:
 
-- **Get Project**: GET /ppm/rest/v1/projects/{projectCode}
-
-💡 WORKFLOW Example: "Create task 'test_task' in project 'my_project'"
-
-Step 1: Find project code
+**Step 1: SQL Lookup** - Find the internal ID
 \`\`\`sql
-SELECT CODE FROM INV_INVESTMENTS WITH(NOLOCK)
-WHERE CODE = 'my_project' OR NAME = 'my_project'
+SELECT ID, CODE, NAME 
+FROM INV_INVESTMENTS WITH(NOLOCK)
+WHERE CODE = 'this_proj' OR NAME = 'this_proj'
+\`\`\`
+Result: ID = 5004001
+
+**Step 2: REST Call** - Use that numeric ID in the path
+\`\`\`
+Endpoint: /ppm/rest/v1/projects/5004001/tasks
+Body: {
+  "code": "task_001",
+  "name": "New Task",
+  "status": "NOT_STARTED"
+}
 \`\`\`
 
-Step 2: Create task via REST
-\`\`\`
-call_rest_api(
-  method: "POST",
-  endpoint: "/ppm/rest/v1/tasks",
-  body: {
-    "code": "test_task",
-    "name": "test_task",
-    "projectCode": "{code_from_step1}",
-    "status": "NOT_STARTED"
-  }
-)
+❌ INCORRECT - What NOT to do:
+- ❌ /ppm/rest/v1/projects/this_proj/tasks (String code → 404!)
+- ❌ /ppm/rest/v1/projects/PRJ123/tasks (String code → 404!)
+- ❌ Guessing the endpoint without SQL lookup first
+
+💡 REAL-WORLD TASK CREATION PAYLOAD:
+Based on actual Clarity logs, here's what works:
+\`\`\`json
+{
+  "code": "unique_task_code",
+  "name": "Task Name",
+  "description": "Optional description",
+  "status": "NOT_STARTED",
+  "priority": 10,
+  "start": "2026-01-10T08:00:00",
+  "finish": "2026-01-15T17:00:00"
+}
 \`\`\`
 
-🚨 CRITICAL:
-- Always verify project/resource codes via SQL before REST calls
-- Use flat endpoints (/ppm/rest/v1/tasks) over nested ones when possible
-- If REST fails, check network/session in error message`;
+🔗 COMMON CLARITY ENDPOINTS:
+- Get Project: GET /ppm/rest/v1/projects/{id}
+- Create Task: POST /ppm/rest/v1/projects/{id}/tasks
+- Update Task: PUT /ppm/rest/v1/tasks/{id}
+- Get Resources: GET /ppm/rest/v1/resources
+
+🎯 YOUR WORKFLOW FOR "Create task X in project Y":
+1. run_read_sql: \`SELECT ID FROM INV_INVESTMENTS WHERE CODE='Y' OR NAME='Y'\`
+2. Extract ID from result (e.g., 5004001)
+3. call_rest_api: POST /ppm/rest/v1/projects/5004001/tasks
+
+🛠️ TOOLS:
+- **run_read_sql**: Use this FIRST to get numeric IDs (ID column)
+- **call_rest_api**: Use this SECOND with the ID you found
+
+⚠️ CRITICAL RULES:
+- ALWAYS query for ID before REST calls
+- NEVER use string codes in REST URL paths
+- Use WITH(NOLOCK) in SQL queries
+- Use TOP (not LIMIT) in MS SQL`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'run_read_sql',
-        description: 'Execute SELECT query to read data. Read-only.',
+        description: 'Execute SELECT query. Use this FIRST to find numeric IDs (e.g., SELECT ID FROM INV_INVESTMENTS WHERE CODE=...).',
         parameters: {
           type: 'object',
           properties: { 
-            sqlQuery: { type: 'string', description: 'MS SQL SELECT with TOP and WITH(NOLOCK)' } 
-          },
-          required: ['sqlQuery']
-        }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'run_custom_sql_update',
-        description: 'Execute UPDATE/INSERT on Custom Objects (ODF_CA_*) only.',
-        parameters: {
-          type: 'object',
-          properties: { 
-            sqlQuery: { type: 'string', description: 'UPDATE ODF_CA_... or INSERT INTO ODF_CA_...' } 
+            sqlQuery: { 
+              type: 'string',
+              description: 'MS SQL SELECT query with WITH(NOLOCK) and TOP'
+            } 
           },
           required: ['sqlQuery']
         }
@@ -392,27 +329,25 @@ call_rest_api(
       type: 'function',
       function: {
         name: 'call_rest_api',
-        description: 'Call Clarity REST API. Requires active session.',
+        description: 'Call Clarity REST API. CRITICAL: Always use numeric IDs (not string codes) in endpoint paths!',
         parameters: {
           type: 'object',
           properties: {
-            method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE'] },
-            endpoint: { type: 'string', description: 'API endpoint like /ppm/rest/v1/tasks' },
-            body: { type: 'object', description: 'JSON body for POST/PUT' }
+            method: { 
+              type: 'string', 
+              enum: ['GET', 'POST', 'PUT', 'DELETE'],
+              description: 'HTTP method'
+            },
+            endpoint: { 
+              type: 'string', 
+              description: 'API endpoint with NUMERIC ID, e.g., /ppm/rest/v1/projects/5004001/tasks'
+            },
+            body: { 
+              type: 'object',
+              description: 'JSON payload for POST/PUT'
+            }
           },
           required: ['method', 'endpoint']
-        }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'get_schema',
-        description: 'Get table columns definition.',
-        parameters: {
-          type: 'object',
-          properties: { objectCode: { type: 'string' } },
-          required: ['objectCode']
         }
       }
     }
@@ -460,14 +395,8 @@ call_rest_api(
           if (fn === 'run_read_sql') {
             res = await executeDynamicQuery(args.sqlQuery);
           }
-          else if (fn === 'run_custom_sql_update') {
-            res = await executeCustomObjectUpdate(args.sqlQuery);
-          }
           else if (fn === 'call_rest_api') {
             res = await callClarityREST(args.method, args.endpoint, args.body, sessionCookie);
-          }
-          else if (fn === 'get_schema') {
-            res = await getObjectSchema(args.objectCode);
           }
           else {
             res = `Unknown tool: ${fn}`;
@@ -533,14 +462,16 @@ async function startHTTPServer() {
     };
 
     try {
-      // ROBUST COOKIE PARSING with Smart Cleaner
+      // Smart Cookie Formatting
       let rawSession = session?.cookies || session?.sessionId || session?.id || null;
       const sessionCookie = formatSessionCookie(rawSession);
 
       if (sessionCookie) {
-        sendUpdate({ type: 'info', data: '🔐 Session Active (REST Ready)' });
+        console.log('[Session] Active - REST enabled');
+        sendUpdate({ type: 'info', data: '🔐 Session Ready (REST Enabled)' });
       } else {
-        sendUpdate({ type: 'info', data: '🔓 Guest Mode (SQL Read-Only)' });
+        console.log('[Session] Guest mode');
+        sendUpdate({ type: 'info', data: '🔓 Guest Mode (SQL Only)' });
       }
 
       await runAIAgentLoop(message, sessionCookie, sendUpdate);
@@ -555,18 +486,18 @@ async function startHTTPServer() {
   app.get('/health', (req, res) => {
     res.json({
       status: 'ready',
-      version: 'v5.2-connectivity-fix',
+      version: 'v5.4-learner-edition',
       database: pool?.connected ? 'connected' : 'disconnected',
       objects: clarityObjects.size,
       ai: 'OpenAI GPT-4o',
       clarityUrl: CLARITY_BASE_URL,
       features: [
+        'id-first-logic',
         'sql-read',
-        'sql-write-custom',
         'rest-api',
-        'smart-cookie-cleaner',
+        'smart-cookie',
         'ssl-bypass',
-        'increased-timeouts'
+        'real-world-trained'
       ]
     });
   });
@@ -574,13 +505,13 @@ async function startHTTPServer() {
   app.listen(PORT, () => {
     console.log('');
     console.log('==========================================================');
-    console.log(`🚀 Clarity MCP v5.2 CONNECTIVITY FIX (OpenAI)`);
+    console.log(`🚀 Clarity MCP v5.4 LEARNER EDITION`);
     console.log(`📡 Chat: http://localhost:${PORT}/api/chat`);
     console.log(`🏥 Health: http://localhost:${PORT}/health`);
     console.log(`📊 Objects: ${clarityObjects.size} loaded`);
     console.log(`🔗 Clarity: ${CLARITY_BASE_URL}`);
-    console.log(`🤖 AI: OpenAI GPT-4o`);
-    console.log(`🛡️ Fixes: Smart Cookie + SSL Bypass + Timeouts`);
+    console.log(`🤖 AI: OpenAI GPT-4o (ID-First Trained)`);
+    console.log(`🎓 Learning: Real API behavior from logs`);
     console.log('==========================================================');
     console.log('');
   });
