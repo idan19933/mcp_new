@@ -467,7 +467,7 @@ async function startHTTPServer() {
 
   // Chat endpoint
   app.post('/api/chat', async (req, res) => {
-    const { message } = req.body;
+    const { message, session } = req.body;
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -480,8 +480,20 @@ async function startHTTPServer() {
     };
 
     try {
-      // BYPASS AUTH - Guest mode always works
-      sendUpdate({ type: 'info', data: '🔓 Guest Mode (Auth Bypassed)' });
+      // Check if user logged in via extension
+      let loggedInUser = null;
+      
+      if (session?.username && session?.password) {
+        // User logged in via extension form
+        loggedInUser = session.username;
+        sendUpdate({ type: 'info', data: `✅ Logged in as ${loggedInUser}` });
+      } else if (session?.cookies) {
+        // User might be logged in via Clarity session
+        sendUpdate({ type: 'info', data: '🔐 Using Clarity session' });
+      } else {
+        // Guest mode
+        sendUpdate({ type: 'info', data: '🔓 Guest Mode' });
+      }
 
       await runAIAgentLoop(message, sendUpdate);
       
