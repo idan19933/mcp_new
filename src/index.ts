@@ -94,23 +94,19 @@ async function loadClarityObjects() {
   try {
     const db = await getPool();
     
-    // Enhanced query: Join CMN_SEC_OBJECTS with ODF_OBJECTS for better table mapping
+    // FIXED: Use ODF_OBJECTS as primary source (has correct column names)
     const result = await db.request().query(`
       SELECT 
-        UPPER(o.OBJECT_CODE) as OBJECT_CODE,
-        o.OBJECT_NAME,
-        COALESCE(odf.DATABASE_TABLE, o.TABLE_NAME) as TABLE_NAME,
-        o.OBJECT_TYPE,
-        o.DESCRIPTION,
-        CASE 
-          WHEN odf.PK_COLUMN IS NOT NULL THEN odf.PK_COLUMN
-          ELSE 'ID'
-        END as PK_COLUMN
-      FROM CMN_SEC_OBJECTS o
-      LEFT JOIN ODF_OBJECTS odf ON odf.CODE = o.OBJECT_CODE
-      WHERE o.IS_ACTIVE = 1 
-      AND (o.TABLE_NAME IS NOT NULL OR odf.DATABASE_TABLE IS NOT NULL)
-      ORDER BY o.OBJECT_NAME
+        UPPER(code) as OBJECT_CODE,
+        name AS OBJECT_NAME,
+        database_table AS TABLE_NAME,
+        object_type AS OBJECT_TYPE,
+        description AS DESCRIPTION,
+        'ID' as PK_COLUMN
+      FROM ODF_OBJECTS
+      WHERE is_active = 1
+      AND database_table IS NOT NULL
+      ORDER BY name
     `);
 
     console.log(`[Objects] Loaded ${result.recordset.length} Clarity objects`);
@@ -201,68 +197,76 @@ async function getUserFromSession(session: any): Promise<string | null> {
       
       const db = await getPool();
       
-      // Try exact match first
+      // FIXED: Use ID (not USER_ID) and USER_STATUS_ID = 1 (not IS_ACTIVE)
       let result = await db.request()
         .input('username', session.username)
         .query(`
-          SELECT TOP 1 USER_ID, USER_NAME
+          SELECT TOP 1 
+            ID as USER_ID, 
+            USER_NAME
           FROM CMN_SEC_USERS
           WHERE USER_NAME = @username
-          AND IS_ACTIVE = 1
+          AND USER_STATUS_ID = 1
         `);
 
       if (result.recordset.length > 0) {
         console.log('[Auth] ✅ User found:', result.recordset[0].USER_NAME);
-        return result.recordset[0].USER_ID;
+        return result.recordset[0].USER_ID.toString();
       }
       
       // Try case-insensitive match
       result = await db.request()
         .input('username', session.username)
         .query(`
-          SELECT TOP 1 USER_ID, USER_NAME
+          SELECT TOP 1 
+            ID as USER_ID, 
+            USER_NAME
           FROM CMN_SEC_USERS
           WHERE LOWER(USER_NAME) = LOWER(@username)
-          AND IS_ACTIVE = 1
+          AND USER_STATUS_ID = 1
         `);
 
       if (result.recordset.length > 0) {
         console.log('[Auth] ✅ User found (case-insensitive):', result.recordset[0].USER_NAME);
-        return result.recordset[0].USER_ID;
+        return result.recordset[0].USER_ID.toString();
       }
       
       // Fallback: Admin user
       console.warn('[Auth] ⚠️ User not found, trying admin fallback');
       result = await db.request()
         .query(`
-          SELECT TOP 1 u.USER_ID, u.USER_NAME
+          SELECT TOP 1 
+            u.ID as USER_ID, 
+            u.USER_NAME
           FROM CMN_SEC_USERS u
-          INNER JOIN CMN_SEC_USER_GROUPS ug ON ug.USER_ID = u.USER_ID
+          INNER JOIN CMN_SEC_USER_GROUPS ug ON ug.USER_ID = u.ID
           INNER JOIN CMN_SEC_GROUPS g ON g.ID = ug.GROUP_ID
           WHERE (g.GROUP_NAME LIKE '%Admin%' OR g.GROUP_CODE IN ('Admin', 'ProcessAdmin'))
-          AND u.IS_ACTIVE = 1
+          AND u.USER_STATUS_ID = 1
         `);
       
       if (result.recordset.length > 0) {
         console.log('[Auth] ⚠️ Using admin fallback:', result.recordset[0].USER_NAME);
-        return result.recordset[0].USER_ID;
+        return result.recordset[0].USER_ID.toString();
       }
       
       // Last resort: any active user
       result = await db.request()
         .query(`
-          SELECT TOP 1 USER_ID, USER_NAME
+          SELECT TOP 1 
+            ID as USER_ID, 
+            USER_NAME
           FROM CMN_SEC_USERS
-          WHERE IS_ACTIVE = 1
+          WHERE USER_STATUS_ID = 1
           ORDER BY LAST_UPDATED_DATE DESC
         `);
       
       if (result.recordset.length > 0) {
         console.log('[Auth] ⚠️ Using first active user:', result.recordset[0].USER_NAME);
-        return result.recordset[0].USER_ID;
+        return result.recordset[0].USER_ID.toString();
       }
       
-      console.error('[Auth] ❌ No users found in database!');
+      console.error('[Auth] ❌ No active users found in database!');
       return null;
     }
 
@@ -277,16 +281,18 @@ async function getUserFromSession(session: any): Promise<string | null> {
       const result = await db.request()
         .input('sessionId', sessionId)
         .query(`
-          SELECT TOP 1 u.USER_ID, u.USER_NAME
+          SELECT TOP 1 
+            u.ID as USER_ID, 
+            u.USER_NAME
           FROM CMN_SEC_USERS u
-          INNER JOIN CMN_SEC_USER_SESSIONS s ON s.USER_ID = u.USER_ID
+          INNER JOIN CMN_SEC_USER_SESSIONS s ON s.USER_ID = u.ID
           WHERE s.SESSION_ID = @sessionId
           AND s.LAST_UPDATED_DATE > DATEADD(hour, -24, GETDATE())
         `);
 
       if (result.recordset.length > 0) {
         console.log('[Auth] ✅ User from session:', result.recordset[0].USER_NAME);
-        return result.recordset[0].USER_ID;
+        return result.recordset[0].USER_ID.toString();
       }
     }
 
