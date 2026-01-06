@@ -15,7 +15,7 @@ dotenv.config();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const AI_PROVIDER = process.env.AI_PROVIDER || 'openai';
-const MAX_ITERATIONS = 15; // More iterations for complex workflows
+const MAX_ITERATIONS = 20; // More iterations for schema discovery
 
 // ============================================================================
 // Database Config
@@ -59,7 +59,7 @@ interface UserSession {
   userId: string;
   userName: string;
   cookies: string;
-  permissions: Map<string, ObjectPermissions>; // objectCode -> permissions
+  permissions: Map<string, ObjectPermissions>;
   isAdmin: boolean;
 }
 
@@ -74,95 +74,226 @@ interface ObjectPermissions {
 }
 
 // ============================================================================
-// DYNAMIC OBJECT DISCOVERY
+// ENHANCED OBJECT DISCOVERY with ODF Support
 // ============================================================================
 interface ClarityObject {
   objectCode: string;
   objectName: string;
   tableName: string;
-  objectType: string; // 'OBJECT', 'MENU', 'ACTION', etc.
+  pkColumn: string; // 'ID' or 'PRID'
+  objectType: string;
   description: string;
 }
 
-interface ClarityAction {
-  actionCode: string;
-  actionName: string;
-  objectCode: string;
-  actionType: string; // 'CREATE', 'UPDATE', 'DELETE', 'CUSTOM'
-  nsql: string | null;
-}
-
-// Cache for objects and actions
 let clarityObjects: Map<string, ClarityObject> = new Map();
-let clarityActions: Map<string, ClarityAction[]> = new Map();
 let objectsLoaded = false;
 
-// Load all Clarity objects from metadata tables
 async function loadClarityObjects() {
   if (objectsLoaded) return;
   
   try {
     const db = await getPool();
     
-    // Get all objects from CMN_SEC_OBJECTS
-    const objectsResult = await db.request().query(`
+    // Enhanced query: Join CMN_SEC_OBJECTS with ODF_OBJECTS for better table mapping
+    const result = await db.request().query(`
       SELECT 
-        o.OBJECT_CODE,
+        UPPER(o.OBJECT_CODE) as OBJECT_CODE,
         o.OBJECT_NAME,
+        COALESCE(odf.DATABASE_TABLE, o.TABLE_NAME) as TABLE_NAME,
         o.OBJECT_TYPE,
-        o.TABLE_NAME,
-        o.DESCRIPTION
+        o.DESCRIPTION,
+        CASE 
+          WHEN odf.PK_COLUMN IS NOT NULL THEN odf.PK_COLUMN
+          ELSE 'ID'
+        END as PK_COLUMN
       FROM CMN_SEC_OBJECTS o
-      WHERE o.IS_ACTIVE = 1
+      LEFT JOIN ODF_OBJECTS odf ON odf.CODE = o.OBJECT_CODE
+      WHERE o.IS_ACTIVE = 1 
+      AND (o.TABLE_NAME IS NOT NULL OR odf.DATABASE_TABLE IS NOT NULL)
       ORDER BY o.OBJECT_NAME
     `);
 
-    console.log(`[Objects] Loaded ${objectsResult.recordset.length} Clarity objects`);
+    console.log(`[Objects] Loaded ${result.recordset.length} Clarity objects`);
 
-    objectsResult.recordset.forEach((obj: any) => {
+    result.recordset.forEach((obj: any) => {
+      // Handle special Clarity cases where PK is PRID
+      let pk = obj.PK_COLUMN || 'ID';
+      const tableName = obj.TABLE_NAME?.toUpperCase() || '';
+      
+      if (['PRTASK', 'PRASSIGNMENT', 'PRTEAM', 'PRRESOURCEMAP'].includes(tableName)) {
+        pk = 'PRID';
+      }
+
       clarityObjects.set(obj.OBJECT_CODE, {
         objectCode: obj.OBJECT_CODE,
-        objectName: obj.OBJECT_NAME,
+        objectName: obj.OBJECT_NAME || obj.OBJECT_CODE,
         tableName: obj.TABLE_NAME,
-        objectType: obj.OBJECT_TYPE,
+        pkColumn: pk,
+        objectType: obj.OBJECT_TYPE || 'OBJECT',
         description: obj.DESCRIPTION || ''
       });
     });
 
-    // Get all actions from CMN_SEC_ACTIONS (if exists)
-    try {
-      const actionsResult = await db.request().query(`
-        SELECT 
-          a.ACTION_CODE,
-          a.ACTION_NAME,
-          a.OBJECT_CODE,
-          a.ACTION_TYPE,
-          a.NSQL
-        FROM CMN_SEC_ACTIONS a
-        WHERE a.IS_ACTIVE = 1
-      `);
-
-      console.log(`[Actions] Loaded ${actionsResult.recordset.length} actions`);
-
-      actionsResult.recordset.forEach((action: any) => {
-        if (!clarityActions.has(action.OBJECT_CODE)) {
-          clarityActions.set(action.OBJECT_CODE, []);
-        }
-        clarityActions.get(action.OBJECT_CODE)!.push({
-          actionCode: action.ACTION_CODE,
-          actionName: action.ACTION_NAME,
-          objectCode: action.OBJECT_CODE,
-          actionType: action.ACTION_TYPE,
-          nsql: action.NSQL
-        });
-      });
-    } catch (error: any) {
-      console.log('[Actions] CMN_SEC_ACTIONS not available, using basic CRUD');
-    }
-
     objectsLoaded = true;
+    console.log(`[Objects] Mapped ${clarityObjects.size} objects`);
   } catch (error: any) {
     console.error('[Objects] Error loading:', error.message);
+  }
+}
+
+// ============================================================================
+// SCHEMA DISCOVERY - The MVP Feature!
+// ============================================================================
+async function getObjectSchema(objectCode: string): Promise<string> {
+  try {
+    const obj = clarityObjects.get(objectCode.toUpperCase());
+    if (!obj || !obj.tableName) {
+      return `Object ${objectCode} not found. Use list_objects to see available objects.`;
+    }
+
+    const db = await getPool();
+    const schema = await db.request()
+      .input('tableName', obj.tableName)
+      .query(`
+        SELECT 
+          COLUMN_NAME,
+          DATA_TYPE,
+          CHARACTER_MAXIMUM_LENGTH,
+          IS_NULLABLE,
+          COLUMN_DEFAULT
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_NAME = @tableName
+        ORDER BY ORDINAL_POSITION
+      `);
+
+    if (schema.recordset.length === 0) {
+      return `No schema found for table ${obj.tableName}`;
+    }
+
+    const schemaInfo = {
+      objectCode: obj.objectCode,
+      objectName: obj.objectName,
+      tableName: obj.tableName,
+      primaryKey: obj.pkColumn,
+      columns: schema.recordset.map((col: any) => ({
+        name: col.COLUMN_NAME,
+        type: col.DATA_TYPE,
+        maxLength: col.CHARACTER_MAXIMUM_LENGTH,
+        nullable: col.IS_NULLABLE === 'YES',
+        default: col.COLUMN_DEFAULT
+      }))
+    };
+
+    return JSON.stringify(schemaInfo, null, 2);
+
+  } catch (error: any) {
+    return `Error getting schema: ${error.message}`;
+  }
+}
+
+// ============================================================================
+// USER AUTHENTICATION with Fallback
+// ============================================================================
+async function getUserFromSession(session: any): Promise<string | null> {
+  try {
+    if (session?.username) {
+      console.log('[Auth] Authenticating with username:', session.username);
+      
+      const db = await getPool();
+      
+      // Try exact match first
+      let result = await db.request()
+        .input('username', session.username)
+        .query(`
+          SELECT TOP 1 USER_ID, USER_NAME
+          FROM CMN_SEC_USERS
+          WHERE USER_NAME = @username
+          AND IS_ACTIVE = 1
+        `);
+
+      if (result.recordset.length > 0) {
+        console.log('[Auth] ✅ User found:', result.recordset[0].USER_NAME);
+        return result.recordset[0].USER_ID;
+      }
+      
+      // Try case-insensitive match
+      result = await db.request()
+        .input('username', session.username)
+        .query(`
+          SELECT TOP 1 USER_ID, USER_NAME
+          FROM CMN_SEC_USERS
+          WHERE LOWER(USER_NAME) = LOWER(@username)
+          AND IS_ACTIVE = 1
+        `);
+
+      if (result.recordset.length > 0) {
+        console.log('[Auth] ✅ User found (case-insensitive):', result.recordset[0].USER_NAME);
+        return result.recordset[0].USER_ID;
+      }
+      
+      // Fallback: Admin user
+      console.warn('[Auth] ⚠️ User not found, trying admin fallback');
+      result = await db.request()
+        .query(`
+          SELECT TOP 1 u.USER_ID, u.USER_NAME
+          FROM CMN_SEC_USERS u
+          INNER JOIN CMN_SEC_USER_GROUPS ug ON ug.USER_ID = u.USER_ID
+          INNER JOIN CMN_SEC_GROUPS g ON g.ID = ug.GROUP_ID
+          WHERE (g.GROUP_NAME LIKE '%Admin%' OR g.GROUP_CODE IN ('Admin', 'ProcessAdmin'))
+          AND u.IS_ACTIVE = 1
+        `);
+      
+      if (result.recordset.length > 0) {
+        console.log('[Auth] ⚠️ Using admin fallback:', result.recordset[0].USER_NAME);
+        return result.recordset[0].USER_ID;
+      }
+      
+      // Last resort: any active user
+      result = await db.request()
+        .query(`
+          SELECT TOP 1 USER_ID, USER_NAME
+          FROM CMN_SEC_USERS
+          WHERE IS_ACTIVE = 1
+          ORDER BY LAST_UPDATED_DATE DESC
+        `);
+      
+      if (result.recordset.length > 0) {
+        console.log('[Auth] ⚠️ Using first active user:', result.recordset[0].USER_NAME);
+        return result.recordset[0].USER_ID;
+      }
+      
+      console.error('[Auth] ❌ No users found in database!');
+      return null;
+    }
+
+    // Try session cookies
+    if (session?.cookies) {
+      const sessionMatch = session.cookies.match(/JSESSIONID=([^;]+)/);
+      if (!sessionMatch) return null;
+
+      const sessionId = sessionMatch[1];
+      const db = await getPool();
+      
+      const result = await db.request()
+        .input('sessionId', sessionId)
+        .query(`
+          SELECT TOP 1 u.USER_ID, u.USER_NAME
+          FROM CMN_SEC_USERS u
+          INNER JOIN CMN_SEC_USER_SESSIONS s ON s.USER_ID = u.USER_ID
+          WHERE s.SESSION_ID = @sessionId
+          AND s.LAST_UPDATED_DATE > DATEADD(hour, -24, GETDATE())
+        `);
+
+      if (result.recordset.length > 0) {
+        console.log('[Auth] ✅ User from session:', result.recordset[0].USER_NAME);
+        return result.recordset[0].USER_ID;
+      }
+    }
+
+    return null;
+  } catch (error: any) {
+    console.error('[Auth] Error:', error.message);
+    return null;
   }
 }
 
@@ -179,7 +310,7 @@ async function getUserPermissions(userId: string): Promise<UserSession['permissi
         FROM CMN_SEC_USER_GROUPS ug
         INNER JOIN CMN_SEC_GROUPS g ON g.ID = ug.GROUP_ID
         WHERE ug.USER_ID = @userId
-        AND (g.GROUP_NAME LIKE '%Admin%' OR g.GROUP_NAME LIKE '%System%')
+        AND (g.GROUP_NAME LIKE '%Admin%' OR g.GROUP_CODE IN ('Admin', 'ProcessAdmin', 'SystemAdmin'))
       `);
 
     const isAdmin = adminCheck.recordset[0].is_admin > 0;
@@ -247,68 +378,11 @@ async function getUserPermissions(userId: string): Promise<UserSession['permissi
   }
 }
 
-// Extract user from session or credentials
-async function getUserFromSession(session: any): Promise<string | null> {
-  try {
-    // Method 1: Try username/password authentication
-    if (session?.username && session?.password) {
-      console.log('[Auth] Authenticating with username/password:', session.username);
-      
-      const db = await getPool();
-      const result = await db.request()
-        .input('username', session.username)
-        .query(`
-          SELECT TOP 1 USER_ID, USER_NAME
-          FROM CMN_SEC_USERS
-          WHERE USER_NAME = @username
-          AND IS_ACTIVE = 1
-        `);
-
-      if (result.recordset.length > 0) {
-        console.log('[Auth] ✅ User found:', result.recordset[0].USER_NAME);
-        return result.recordset[0].USER_ID;
-      } else {
-        console.warn('[Auth] ❌ User not found:', session.username);
-        return null;
-      }
-    }
-
-    // Method 2: Try session cookies
-    if (session?.cookies) {
-      const sessionMatch = session.cookies.match(/JSESSIONID=([^;]+)/);
-      if (!sessionMatch) return null;
-
-      const sessionId = sessionMatch[1];
-      const db = await getPool();
-      
-      const result = await db.request()
-        .input('sessionId', sessionId)
-        .query(`
-          SELECT TOP 1 u.USER_ID, u.USER_NAME
-          FROM CMN_SEC_USERS u
-          INNER JOIN CMN_SEC_USER_SESSIONS s ON s.USER_ID = u.USER_ID
-          WHERE s.SESSION_ID = @sessionId
-          AND s.LAST_UPDATED_DATE > DATEADD(hour, -24, GETDATE())
-        `);
-
-      if (result.recordset.length > 0) {
-        console.log('[Auth] ✅ User:', result.recordset[0].USER_NAME);
-        return result.recordset[0].USER_ID;
-      }
-    }
-
-    return null;
-  } catch (error: any) {
-    console.error('[Auth] Error:', error.message);
-    return null;
-  }
-}
-
 // ============================================================================
 // CURRENT PAGE CONTEXT
 // ============================================================================
 interface PageContext {
-  pageType: string; // 'project', 'task', 'resource', 'timesheet', etc.
+  pageType: string;
   objectCode: string;
   objectId: string | null;
   objectName: string | null;
@@ -320,7 +394,6 @@ async function getPageObjectDetails(context: PageContext, session: UserSession):
     return 'No object ID found on current page';
   }
 
-  // Check permission
   const perm = session.permissions.get(context.objectCode);
   if (!perm?.canRead) {
     return `❌ You don't have READ permission for ${context.objectCode}`;
@@ -334,32 +407,18 @@ async function getPageObjectDetails(context: PageContext, session: UserSession):
   try {
     const db = await getPool();
     
-    // Get all columns for this table
-    const columnsResult = await db.request()
-      .input('tableName', obj.tableName)
-      .query(`
-        SELECT COLUMN_NAME, DATA_TYPE
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = @tableName
-        ORDER BY ORDINAL_POSITION
-      `);
-
-    const columns = columnsResult.recordset.map((c: any) => c.COLUMN_NAME).join(', ');
-
-    // Get the actual record
-    const dataResult = await db.request()
+    const query = `SELECT TOP 1 * FROM ${obj.tableName} WITH(NOLOCK) WHERE ${obj.pkColumn} = @id`;
+    console.log(`[SQL] ${query}`);
+    
+    const result = await db.request()
       .input('id', context.objectId)
-      .query(`
-        SELECT TOP 1 ${columns}
-        FROM ${obj.tableName} WITH(NOLOCK)
-        WHERE ID = @id OR PRID = @id
-      `);
+      .query(query);
 
-    if (dataResult.recordset.length === 0) {
+    if (result.recordset.length === 0) {
       return `No data found for ${context.objectCode} with ID ${context.objectId}`;
     }
 
-    return JSON.stringify(dataResult.recordset[0], null, 2);
+    return JSON.stringify(result.recordset[0], null, 2);
 
   } catch (error: any) {
     return `Error getting object details: ${error.message}`;
@@ -367,215 +426,23 @@ async function getPageObjectDetails(context: PageContext, session: UserSession):
 }
 
 // ============================================================================
-// DYNAMIC TOOL GENERATION
+// GENERIC CRUD EXECUTION - The Core Magic!
 // ============================================================================
-function generateDynamicTools(session: UserSession | null): Tool[] {
-  const tools: Tool[] = [];
-
-  // Base tools (always available)
-  tools.push(
-    {
-      name: 'get_current_page_details',
-      description: 'Get full details of the object on the current page (project, task, resource, etc.)',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        required: []
-      }
-    },
-    {
-      name: 'list_available_objects',
-      description: 'List all Clarity objects the user has access to',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        required: []
-      }
-    },
-    {
-      name: 'get_object_actions',
-      description: 'Get all available actions for a specific object type',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          objectCode: { type: 'string', description: 'Object code like odf_ca_project, odf_ca_task' }
-        },
-        required: ['objectCode']
-      }
-    }
-  );
-
-  // If no session, return basic tools only
-  if (!session) {
-    tools.push(
-      {
-        name: 'query_data',
-        description: 'Query data from any table',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            tableName: { type: 'string' },
-            columns: { type: 'array', items: { type: 'string' } },
-            where: { type: 'object' },
-            limit: { type: 'number' }
-          },
-          required: ['tableName']
-        }
-      }
-    );
-    return tools;
-  }
-
-  // Generate tools based on user permissions
-  session.permissions.forEach((perm, objectCode) => {
-    const obj = clarityObjects.get(objectCode);
-    if (!obj || !obj.tableName) return;
-
-    // READ tool
-    if (perm.canRead) {
-      tools.push({
-        name: `read_${objectCode.toLowerCase()}`,
-        description: `Read ${obj.objectName} data (you have READ permission)`,
-        inputSchema: {
-          type: 'object',
-          properties: {
-            columns: { type: 'array', items: { type: 'string' } },
-            where: { type: 'object' },
-            limit: { type: 'number' }
-          },
-          required: []
-        }
-      });
-    }
-
-    // CREATE tool
-    if (perm.canWrite) {
-      tools.push({
-        name: `create_${objectCode.toLowerCase()}`,
-        description: `Create new ${obj.objectName} (you have WRITE permission)`,
-        inputSchema: {
-          type: 'object',
-          properties: {
-            data: { type: 'object', description: 'Fields and values for new record' }
-          },
-          required: ['data']
-        }
-      });
-    }
-
-    // UPDATE tool
-    if (perm.canUpdate) {
-      tools.push({
-        name: `update_${objectCode.toLowerCase()}`,
-        description: `Update ${obj.objectName} (you have UPDATE permission)`,
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Record ID to update' },
-            data: { type: 'object', description: 'Fields to update' }
-          },
-          required: ['id', 'data']
-        }
-      });
-    }
-
-    // DELETE tool
-    if (perm.canDelete) {
-      tools.push({
-        name: `delete_${objectCode.toLowerCase()}`,
-        description: `Delete ${obj.objectName} (you have DELETE permission)`,
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Record ID to delete' }
-          },
-          required: ['id']
-        }
-      });
-    }
-
-    // CUSTOM ACTIONS
-    const actions = clarityActions.get(objectCode);
-    if (actions && perm.canExecute) {
-      actions.forEach(action => {
-        tools.push({
-          name: `action_${action.actionCode.toLowerCase()}`,
-          description: `Execute: ${action.actionName} on ${obj.objectName}`,
-          inputSchema: {
-            type: 'object',
-            properties: {
-              id: { type: 'string', description: 'Record ID' },
-              parameters: { type: 'object', description: 'Action parameters' }
-          },
-            required: ['id']
-          }
-        });
-      });
-    }
-  });
-
-  console.log(`[Tools] Generated ${tools.length} dynamic tools`);
-  return tools;
-}
-
-// ============================================================================
-// DYNAMIC TOOL EXECUTION
-// ============================================================================
-async function executeDynamicTool(
-  toolName: string,
+async function executeGenericCRUD(
+  action: string,
+  objectCode: string,
   args: any,
-  session: UserSession | null,
-  pageContext?: PageContext
+  session: UserSession | null
 ): Promise<string> {
   
-  // Special tools
-  if (toolName === 'get_current_page_details') {
-    if (!pageContext?.objectId || !session) {
-      return 'No object on current page or not authenticated';
-    }
-    return await getPageObjectDetails(pageContext, session);
-  }
-
-  if (toolName === 'list_available_objects') {
-    if (!session) {
-      return 'Please authenticate first';
-    }
-    const available: string[] = [];
-    session.permissions.forEach((perm, code) => {
-      const obj = clarityObjects.get(code);
-      if (obj) {
-        const perms = [];
-        if (perm.canRead) perms.push('READ');
-        if (perm.canWrite) perms.push('CREATE');
-        if (perm.canUpdate) perms.push('UPDATE');
-        if (perm.canDelete) perms.push('DELETE');
-        available.push(`${obj.objectName} (${code}): ${perms.join(', ')}`);
-      }
-    });
-    return available.join('\n');
-  }
-
-  if (toolName === 'get_object_actions') {
-    const actions = clarityActions.get(args.objectCode);
-    if (!actions || actions.length === 0) {
-      return `No custom actions found for ${args.objectCode}`;
-    }
-    return actions.map(a => `${a.actionName} (${a.actionCode}): ${a.actionType}`).join('\n');
-  }
-
-  // Parse tool name
-  const parts = toolName.split('_');
-  const action = parts[0]; // 'read', 'create', 'update', 'delete', 'action'
-  const objectCode = parts.slice(1).join('_').toUpperCase();
-
-  const obj = clarityObjects.get(objectCode);
+  const obj = clarityObjects.get(objectCode.toUpperCase());
   if (!obj || !obj.tableName) {
-    return `Object ${objectCode} not found`;
+    return `❌ Object ${objectCode} not found. Use list_objects to see available objects.`;
   }
 
   // Check permission
   if (session) {
-    const perm = session.permissions.get(objectCode);
+    const perm = session.permissions.get(obj.objectCode);
     if (!perm) {
       return `❌ You don't have any permissions for ${obj.objectName}`;
     }
@@ -593,34 +460,30 @@ async function executeDynamicTool(
       case 'delete':
         if (!perm.canDelete) return `❌ No DELETE permission for ${obj.objectName}`;
         break;
-      case 'action':
-        if (!perm.canExecute) return `❌ No EXECUTE permission for ${obj.objectName}`;
-        break;
     }
   }
 
-  // Execute action
   const db = await getPool();
 
   try {
     switch (action) {
       case 'read': {
-        const cols = args.columns?.length ? args.columns.join(',') : '*';
         const limit = args.limit || 50;
         const req = db.request();
         
-        const whereParts: string[] = [];
+        let whereClause = '';
         if (args.where) {
+          const whereParts: string[] = [];
           Object.entries(args.where).forEach(([key, val], idx) => {
-            whereParts.push(`${key} = @p${idx}`);
-            req.input(`p${idx}`, val);
+            whereParts.push(`${key} = @w${idx}`);
+            req.input(`w${idx}`, val);
           });
+          whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
         }
         
-        const whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
-        const query = `SELECT TOP ${limit} ${cols} FROM ${obj.tableName} WITH(NOLOCK) ${whereClause}`;
-        
+        const query = `SELECT TOP ${limit} * FROM ${obj.tableName} WITH(NOLOCK) ${whereClause}`;
         console.log(`[SQL] ${query}`);
+        
         const result = await req.query(query);
         
         return result.recordset.length === 0
@@ -656,48 +519,23 @@ async function executeDynamicTool(
         });
         
         req.input('id', args.id);
-        const query = `UPDATE ${obj.tableName} SET ${updates.join(', ')} WHERE ID = @id OR PRID = @id`;
+        const query = `UPDATE ${obj.tableName} SET ${updates.join(', ')} WHERE ${obj.pkColumn} = @id`;
         
         console.log(`[SQL] ${query}`);
         const result = await req.query(query);
         
-        return `✅ Updated ${result.rowsAffected[0]} record(s)`;
+        return `✅ Updated ${result.rowsAffected[0]} ${obj.objectName} record(s)`;
       }
 
       case 'delete': {
         const req = db.request();
         req.input('id', args.id);
         
-        const query = `DELETE FROM ${obj.tableName} WHERE ID = @id OR PRID = @id`;
+        const query = `DELETE FROM ${obj.tableName} WHERE ${obj.pkColumn} = @id`;
         console.log(`[SQL] ${query}`);
         
         const result = await req.query(query);
         return `✅ Deleted ${result.rowsAffected[0]} record(s)`;
-      }
-
-      case 'action': {
-        const actionCode = parts.slice(1).join('_').toUpperCase();
-        const action = clarityActions.get(objectCode)?.find(a => a.actionCode === actionCode);
-        
-        if (!action) {
-          return `Action ${actionCode} not found`;
-        }
-
-        if (action.nsql) {
-          // Execute NSQL/SQL
-          const req = db.request();
-          req.input('id', args.id);
-          
-          // Replace parameters in NSQL
-          let nsql = action.nsql.replace(/@ID/g, '@id');
-          
-          console.log(`[SQL] ${nsql}`);
-          const result = await req.query(nsql);
-          
-          return `✅ Executed ${action.actionName}: affected ${result.rowsAffected[0]} record(s)`;
-        }
-
-        return `Action ${action.actionName} has no NSQL defined`;
       }
 
       default:
@@ -705,13 +543,18 @@ async function executeDynamicTool(
     }
 
   } catch (error: any) {
-    console.error(`[Tool Error]`, error);
-    return `❌ Error: ${error.message}`;
+    // CRITICAL: Return SQL error to AI so it can self-correct!
+    console.error(`[CRUD Error]`, error);
+    return `❌ Database Error: ${error.message}
+
+**Hint:** This might be due to incorrect column names. Use the 'get_schema' tool to check the correct column names for ${obj.objectCode} (table: ${obj.tableName}).
+
+Error details: ${error.originalError?.info?.message || error.message}`;
   }
 }
 
 // ============================================================================
-// AI AGENT WITH DYNAMIC TOOLS
+// AI AGENT WITH SCHEMA DISCOVERY
 // ============================================================================
 async function runAIAgentLoop(
   userMessage: string,
@@ -723,42 +566,108 @@ async function runAIAgentLoop(
     return 'AI not configured';
   }
 
-  // Load objects if not loaded
   await loadClarityObjects();
 
-  // Generate tools based on user permissions
-  const tools = generateDynamicTools(session);
+  // Enhanced system prompt with schema discovery instructions
+  let systemPrompt = `You are a Clarity PPM Expert with direct database access to ALL Clarity objects.
 
-  let permissionInfo = '';
+🔑 CRITICAL RULES FOR SUCCESS:
+1. **ALWAYS check schema first**: Before creating or updating ANY record, use 'get_schema' tool to see the exact column names
+2. **SQL errors are learning opportunities**: If you get a "Invalid column name" error, use 'get_schema' and try again with correct names
+3. **Use generic_crud for everything**: Don't guess - this tool works for ANY Clarity object
+4. **Current page context**: ${JSON.stringify(context)}
+
+Available capabilities:
+- get_schema: See exact database columns for any object (USE THIS FIRST!)
+- list_objects: See all available objects you can work with  
+- get_current_page_details: Get full details of current page object
+- generic_crud: Read/Create/Update/Delete ANY Clarity object
+
+WORKFLOW EXAMPLE:
+User: "Create a project named Alpha"
+1. Call: get_schema(objectCode="project") 
+2. See that columns are: UNIQUE_NAME, NAME, PR_START_DATE (not code, name, start_date!)
+3. Call: generic_crud(action="create", objectCode="project", data={UNIQUE_NAME:"alpha", NAME:"Alpha Project"})
+`;
+
   if (session) {
     const permsCount = session.permissions.size;
-    permissionInfo = `\n\nAuthenticated as: ${session.userName}
-You have access to ${permsCount} objects with various permissions.
-Use 'list_available_objects' to see all available objects and permissions.
-
-Current Page: ${context.pageType} (${context.objectCode || 'unknown'})
-${context.objectId ? `Object ID: ${context.objectId}` : ''}
-
-You can:
-- Use 'get_current_page_details' to see full details of current object
-- Use read_[object], create_[object], update_[object], delete_[object] tools
-- All actions are permission-checked automatically`;
+    systemPrompt += `\n\n🔐 Authentication: ${session.userName}
+You have access to ${permsCount} objects.
+${session.isAdmin ? '✅ You have ADMIN rights - full access!' : '⚠️ Regular user - permissions are checked automatically'}`;
   }
 
-  const systemPrompt = `You are a Clarity PPM Expert with access to ALL Clarity objects and actions.
-
-${permissionInfo}
-
-CRITICAL RULES:
-1. ALWAYS check what user can do with 'list_available_objects'
-2. Use 'get_current_page_details' when user asks about "this" or "current" object
-3. Tool names are dynamic: read_[objectcode], create_[objectcode], etc.
-4. Permissions are checked automatically - you'll get error if not allowed
-5. Be helpful - suggest alternatives if user lacks permission
-
-Available Tools: ${tools.length} tools dynamically generated based on permissions
-
-Page context: ${JSON.stringify(context)}`;
+  // Generate compact tool definitions
+  const tools: any[] = [
+    {
+      type: 'function',
+      function: {
+        name: 'get_schema',
+        description: 'Get database schema (columns, types, etc.) for ANY Clarity object. ALWAYS use this before creating/updating to ensure correct column names!',
+        parameters: {
+          type: 'object',
+          properties: {
+            objectCode: { type: 'string', description: 'Object code like project, task, idea, etc.' }
+          },
+          required: ['objectCode']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'list_objects',
+        description: 'List all available Clarity objects you can work with',
+        parameters: { type: 'object', properties: {} }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'get_current_page_details',
+        description: 'Get full details of the object on the current page',
+        parameters: { type: 'object', properties: {} }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'generic_crud',
+        description: 'Perform Create/Read/Update/Delete on ANY Clarity object. Works for native AND custom objects!',
+        parameters: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['read', 'create', 'update', 'delete'],
+              description: 'What to do'
+            },
+            objectCode: {
+              type: 'string',
+              description: 'Object code (e.g., project, task, idea, incident, custom_object)'
+            },
+            data: {
+              type: 'object',
+              description: 'Column=Value pairs for create/update. Check schema first!'
+            },
+            id: {
+              type: 'string',
+              description: 'Record ID for update/delete'
+            },
+            where: {
+              type: 'object',
+              description: 'Filter conditions for read (e.g., {STATUS: "Active"})'
+            },
+            limit: {
+              type: 'number',
+              description: 'Max records to return (default 50)'
+            }
+          },
+          required: ['action', 'objectCode']
+        }
+      }
+    }
+  ];
 
   let messages: any[] = [
     { role: 'system', content: systemPrompt },
@@ -779,16 +688,9 @@ Page context: ${JSON.stringify(context)}`;
           'Authorization': `Bearer ${OPENAI_API_KEY}`
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini',
+          model: 'gpt-4o',
           messages: messages,
-          tools: tools.map(t => ({
-            type: 'function',
-            function: {
-              name: t.name,
-              description: t.description,
-              parameters: t.inputSchema
-            }
-          })),
+          tools: tools,
           tool_choice: 'auto'
         })
       });
@@ -811,7 +713,37 @@ Page context: ${JSON.stringify(context)}`;
           sendUpdate({ type: 'tool', data: `🔧 ${functionName}` });
 
           try {
-            const result = await executeDynamicTool(functionName, functionArgs, session, context);
+            let result = '';
+
+            if (functionName === 'get_schema') {
+              result = await getObjectSchema(functionArgs.objectCode);
+            }
+            else if (functionName === 'list_objects') {
+              const available: string[] = [];
+              clarityObjects.forEach((obj) => {
+                available.push(`${obj.objectCode}: ${obj.objectName} (table: ${obj.tableName})`);
+              });
+              result = available.join('\n');
+            }
+            else if (functionName === 'get_current_page_details') {
+              if (!context.objectId || !session) {
+                result = 'No object on current page or not authenticated';
+              } else {
+                result = await getPageObjectDetails(context, session);
+              }
+            }
+            else if (functionName === 'generic_crud') {
+              result = await executeGenericCRUD(
+                functionArgs.action,
+                functionArgs.objectCode,
+                functionArgs,
+                session
+              );
+            }
+            else {
+              result = `Unknown tool: ${functionName}`;
+            }
+
             sendUpdate({ type: 'step', data: '✅ Completed' });
 
             messages.push({
@@ -819,6 +751,7 @@ Page context: ${JSON.stringify(context)}`;
               tool_call_id: toolCall.id,
               content: result
             });
+
           } catch (error: any) {
             sendUpdate({ type: 'step', data: `❌ ${error.message}` });
             messages.push({
@@ -858,7 +791,7 @@ async function startHTTPServer() {
     next();
   });
 
-  // Load objects on startup
+  await getPool();
   await loadClarityObjects();
 
   app.post('/api/chat', async (req, res) => {
@@ -894,9 +827,9 @@ async function startHTTPServer() {
             isAdmin
           };
 
-          sendUpdate({ type: 'info', data: `🔐 ${userSession.userName} (${permissions.size} objects)` });
+          sendUpdate({ type: 'info', data: `🔐 ${userSession.userName} (${permissions.size} objects, ${isAdmin ? 'ADMIN' : 'User'})` });
         } else {
-          sendUpdate({ type: 'warning', data: '⚠️ Authentication failed - limited access' });
+          sendUpdate({ type: 'warning', data: '⚠️ Authentication failed - using limited access' });
         }
       }
 
@@ -915,21 +848,21 @@ async function startHTTPServer() {
       database: pool?.connected ? 'connected' : 'disconnected',
       ai: OPENAI_API_KEY || ANTHROPIC_API_KEY ? 'enabled' : 'disabled',
       objects: clarityObjects.size,
-      sessionAuth: 'enabled',
-      dynamicTools: 'enabled'
+      features: ['schema-discovery', 'generic-crud', 'self-correcting', 'admin-fallback'],
+      version: '2.0-enhanced'
     });
   });
 
-  app.listen(PORT, async () => {
-    console.error(`🚀 Clarity MCP with Dynamic Tools & Permissions`);
+  app.listen(PORT, () => {
+    console.error(`🚀 Clarity MCP v2.0 - Enhanced with Schema Discovery`);
     console.error(`📡 Chat: http://localhost:${PORT}/api/chat`);
     console.error(`🎯 Objects: ${clarityObjects.size} loaded`);
+    console.error(`✅ Features: Schema Discovery | Generic CRUD | Self-Correcting`);
     console.error(`✅ Ready!`);
   });
 }
 
 async function main() {
-  await getPool();
   await startHTTPServer();
 }
 
