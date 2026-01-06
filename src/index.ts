@@ -3,22 +3,26 @@
 import sql from 'mssql';
 import express from 'express';
 import dotenv from 'dotenv';
+import https from 'https';
 
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v5.1 - PRODUCTION (OPENAI + REST + SQL)");
+console.log("🚀 CLARITY MCP v5.2 - CONNECTIVITY FIX EDITION");
 console.log("==========================================================");
 
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+
+// Increased timeouts for slower internal networks
 const DB_CONFIG = {
   user: process.env.DB_USER || 'niku',
   password: process.env.DB_PASSWORD || 'niku',
   server: process.env.DB_SERVER || '16.16.83.171',
   database: process.env.DB_NAME || 'niku',
+  requestTimeout: 60000, // 60s timeout
   options: {
     encrypt: false,
     trustServerCertificate: true,
@@ -27,8 +31,12 @@ const DB_CONFIG = {
   pool: { max: 20, min: 2, idleTimeoutMillis: 30000 }
 };
 
-// Clarity Base URL for REST calls
 const CLARITY_BASE_URL = process.env.CLARITY_URL || `http://${DB_CONFIG.server}:8080`; 
+
+// SSL Agent to bypass "self-signed certificate" errors
+const insecureAgent = new https.Agent({
+  rejectUnauthorized: false
+});
 
 // ============================================================================
 // EXPANDED TABLE MAP
@@ -50,22 +58,14 @@ const TABLE_MAP: Record<string, string> = {
   'STATUS_REPORT': 'COP_PRJ_STATUSRPT',
   'FINANCIAL_PLAN': 'FIN_PLANS',
   'COST_PLAN': 'FIN_COST_PLAN_DETAILS',
-  'BENEFIT_PLAN': 'FIN_BENEFIT_PLANS',
-  'TRANSACTION': 'FIN_TRANSACTIONS',
-  'BUDGET': 'FIN_FINANCIALS',
-  'RATE_MATRIX': 'RATE_MATRIX',
   'DEPARTMENT': 'CMN_DEPARTMENTS',
   'LOCATION': 'CMN_LOCATIONS',
   'OBS_UNIT': 'PRJ_OBS_UNITS',
-  'OBS_ASSOCIATION': 'PRJ_OBS_ASSOCIATIONS',
   'PROCESS': 'BPM_DEF_PROCESSES',
-  'PROCESS_RUN': 'BPM_RUN_PROCESSES',
   'LOOKUP': 'CMN_LOOKUPS_V',
   'USER': 'CMN_SEC_USERS',
-  'GROUP': 'CMN_SEC_GROUPS',
   'VENDOR': 'ODF_CA_VENDOR',
-  'CONTRACT': 'ODF_CA_CONTRACT',
-  'APPLICATION': 'ODF_CA_APPLICATION'
+  'CONTRACT': 'ODF_CA_CONTRACT'
 };
 
 // ============================================================================
@@ -101,22 +101,59 @@ async function loadClarityObjects() {
   console.log('[Objects] Building object map...');
   try {
     const db = await getPool();
-    const result = await db.request().query("SELECT code, name FROM ODF_OBJECTS WHERE is_active = 1");
-    
-    result.recordset.forEach((obj: any) => {
-      const code = (obj.code || '').toUpperCase();
-      const name = obj.name || code;
-      if (!code) return;
-      let tableName = TABLE_MAP[code] || `ODF_CA_${code}`;
-      clarityObjects.set(code, { objectCode: code, objectName: name, tableName: tableName });
-    });
-    console.log(`✅ [Objects] Mapped ${clarityObjects.size} objects`);
+    try {
+      const result = await db.request().query("SELECT code, name FROM ODF_OBJECTS WHERE is_active = 1");
+      result.recordset.forEach((obj: any) => {
+        const code = (obj.code || '').toUpperCase();
+        const name = obj.name || code;
+        if (!code) return;
+        let tableName = TABLE_MAP[code] || `ODF_CA_${code}`;
+        clarityObjects.set(code, { objectCode: code, objectName: name, tableName: tableName });
+      });
+      console.log(`✅ [Objects] Mapped ${clarityObjects.size} objects from DB`);
+    } catch (dbErr: any) {
+      console.warn('⚠️ [Objects] ODF_OBJECTS query failed. Using hardcoded map.');
+      throw dbErr;
+    }
   } catch (error: any) {
-    console.warn('⚠️ [Objects] DB load failed. Using hardcoded map.');
+    // Fallback
     Object.entries(TABLE_MAP).forEach(([code, table]) => {
       clarityObjects.set(code, { objectCode: code, objectName: code, tableName: table });
     });
+    console.log(`✅ [Objects] Fallback loaded ${clarityObjects.size} objects`);
   }
+}
+
+// ============================================================================
+// HELPER: SMART COOKIE CLEANER
+// ============================================================================
+function formatSessionCookie(rawValue: any): string | null {
+  if (!rawValue) return null;
+  let val = String(rawValue).trim();
+
+  console.log(`[Cookie] Raw input: ${val.substring(0, 30)}...`);
+
+  // 1. If it already looks like "JSESSIONID=...", extract the ID part
+  if (val.includes('JSESSIONID=')) {
+    const match = val.match(/JSESSIONID=([^;]+)/);
+    if (match) {
+      val = match[1];
+      console.log(`[Cookie] Extracted from JSESSIONID=: ${val.substring(0, 20)}...`);
+    }
+  }
+  // 2. If it looks like "sessionId=...", strip that
+  else if (val.startsWith('sessionId=')) {
+    val = val.replace('sessionId=', '');
+    console.log(`[Cookie] Stripped sessionId=: ${val.substring(0, 20)}...`);
+  }
+
+  // 3. Clean any remaining weird chars
+  val = val.replace(/['";]/g, '');
+
+  const formatted = `JSESSIONID=${val}`;
+  console.log(`[Cookie] Final formatted: ${formatted.substring(0, 30)}...`);
+  
+  return formatted;
 }
 
 // ============================================================================
@@ -127,13 +164,13 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
   const upperSQL = sqlQuery.toUpperCase().trim();
   
   if (!upperSQL.startsWith('SELECT') && !upperSQL.startsWith('WITH')) {
-    return '❌ Security: Only SELECT queries allowed in this tool.';
+    return '❌ Security: Only SELECT queries allowed.';
   }
-  if (forbidden.some(word => upperSQL.includes(` ${word} `))) {
-    return `❌ Security: '${forbidden.find(w => upperSQL.includes(w))}' not allowed.`;
+  if (forbidden.some(w => upperSQL.includes(` ${w} `))) {
+    return '❌ Security: Forbidden keyword detected.';
   }
   if (upperSQL.includes('LIMIT ')) {
-    return `❌ SYNTAX ERROR: Use 'TOP n' instead of 'LIMIT n' (MS SQL).`;
+    return `❌ SYNTAX ERROR: Use 'TOP n' instead of 'LIMIT n'.`;
   }
 
   try {
@@ -143,7 +180,8 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
     
     if (result.recordset.length === 0) return 'Query executed. No results found.';
     if (result.recordset.length > 100) {
-      return JSON.stringify(result.recordset.slice(0, 100), null, 2) + `\n\n... (${result.recordset.length} total)`;
+      return JSON.stringify(result.recordset.slice(0, 100), null, 2) + 
+             `\n\n... (${result.recordset.length} total)`;
     }
     return JSON.stringify(result.recordset, null, 2);
   } catch (error: any) {
@@ -152,33 +190,32 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
 }
 
 // ============================================================================
-// TOOL 2: CUSTOM OBJECT UPDATE (WRITE)
+// TOOL 2: CUSTOM OBJECT UPDATE
 // ============================================================================
 async function executeCustomObjectUpdate(sqlQuery: string): Promise<string> {
   const upperSQL = sqlQuery.toUpperCase().trim();
   
   if (!upperSQL.startsWith('UPDATE') && !upperSQL.startsWith('INSERT')) {
-    return '❌ Security: Only UPDATE or INSERT allowed.';
+    return '❌ Security: Only UPDATE/INSERT allowed.';
   }
+  
   const targetTableMatch = upperSQL.match(/(UPDATE|INTO)\s+(ODF_CA_\w+)/);
   if (!targetTableMatch) {
-    return '❌ Security: You can only update Custom Objects (ODF_CA_*). System tables are protected.';
+    return '❌ Security: Only ODF_CA_* tables allowed.';
   }
-
-  const tableName = targetTableMatch[2];
-  console.log(`[SQL-WRITE] Targeting custom table: ${tableName}`);
 
   try {
     const db = await getPool();
+    console.log(`[SQL-WRITE] ${sqlQuery}`);
     const result = await db.request().query(sqlQuery);
-    return `✅ Success: ${result.rowsAffected[0]} rows affected in ${tableName}`;
+    return `✅ Success: ${result.rowsAffected[0]} rows affected.`;
   } catch (error: any) {
-    return `❌ SQL Update Error: ${error.message}`;
+    return `❌ SQL Error: ${error.message}`;
   }
 }
 
 // ============================================================================
-// TOOL 3: REST API CALLER (IMPROVED)
+// TOOL 3: REST API CALLER (Robust + SSL Bypass)
 // ============================================================================
 async function callClarityREST(
   method: string, 
@@ -187,43 +224,57 @@ async function callClarityREST(
   sessionCookie: string | null
 ): Promise<string> {
   if (!sessionCookie) {
-    return '❌ Error: No Active Session. REST API requires authentication. Please log in via the Extension.';
+    return '❌ Error: No Active Session. Please login via Extension.';
   }
 
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   const url = `${CLARITY_BASE_URL}${cleanEndpoint}`;
 
   console.log(`[REST] ${method} ${url}`);
-  console.log(`[REST] Session: ${sessionCookie.substring(0, 20)}...`);
+  console.log(`[REST] Cookie: ${sessionCookie.substring(0, 35)}...`);
 
   try {
-    const response = await fetch(url, {
+    const fetchOptions: any = {
       method: method,
       headers: {
         'Content-Type': 'application/json',
-        'Cookie': sessionCookie, // CRITICAL: Passes JSESSIONID
+        'Cookie': sessionCookie,
         'Accept': 'application/json'
       },
       body: body ? JSON.stringify(body) : undefined
-    });
+    };
 
+    // Add SSL bypass agent for HTTPS
+    if (url.startsWith('https')) {
+      fetchOptions.agent = insecureAgent;
+    }
+
+    const response = await fetch(url, fetchOptions);
     const text = await response.text();
     
     console.log(`[REST] Response Status: ${response.status}`);
     
     if (!response.ok) {
-       return `❌ REST Error (${response.status}): ${text}`;
+       console.error(`[REST Error] ${response.status}: ${text.substring(0, 200)}`);
+       return `❌ API Error (${response.status}): ${text.substring(0, 300)}`;
     }
 
     try {
       const json = JSON.parse(text);
       return JSON.stringify(json, null, 2);
     } catch {
-      return text; // Return raw if not JSON
+      return text;
     }
 
   } catch (error: any) {
-    return `❌ Network Error: ${error.message}`;
+    console.error(`[Network Error] ${error.message}`);
+    return `❌ Network Error: ${error.message}
+
+**Troubleshooting:**
+- Check URL: ${url}
+- Verify VPN/Network access
+- Ensure Clarity server is running
+- Check firewall settings`;
   }
 }
 
@@ -233,13 +284,13 @@ async function callClarityREST(
 async function getObjectSchema(objectCode: string): Promise<string> {
   const obj = clarityObjects.get(objectCode.toUpperCase());
   if (!obj) return `Object '${objectCode}' not found.`;
-
+  
   try {
     const db = await getPool();
-    const check = await db.request().query(`SELECT OBJECT_ID('${obj.tableName}') as ID`);
-    if (!check.recordset[0]?.ID) return `Table '${obj.tableName}' does not exist.`;
-    
-    const q = `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${obj.tableName}' ORDER BY ORDINAL_POSITION`;
+    const q = `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE 
+               FROM INFORMATION_SCHEMA.COLUMNS 
+               WHERE TABLE_NAME = '${obj.tableName}' 
+               ORDER BY ORDINAL_POSITION`;
     const res = await db.request().query(q);
     
     return JSON.stringify({ 
@@ -247,11 +298,13 @@ async function getObjectSchema(objectCode: string): Promise<string> {
       table: obj.tableName, 
       columns: res.recordset 
     }, null, 2);
-  } catch (e: any) { return `Error: ${e.message}`; }
+  } catch (e: any) { 
+    return `Error: ${e.message}`; 
+  }
 }
 
 // ============================================================================
-// AI AGENT LOOP (OPENAI GPT-4o)
+// AI AGENT LOOP (GPT-4o)
 // ============================================================================
 async function runAIAgentLoop(
   userMessage: string, 
@@ -261,94 +314,61 @@ async function runAIAgentLoop(
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
   if (clarityObjects.size === 0) await loadClarityObjects();
 
-  const systemPrompt = `You are a Clarity PPM Architect & Developer with full access.
+  const systemPrompt = `You are a Clarity PPM Architect.
 
-🎯 CAPABILITIES:
+🎯 GOAL: Manage Clarity data using SQL (Read) and REST (Write).
 
-1. **SQL Read**: Use 'run_read_sql' for data analysis and reporting.
-2. **SQL Write**: Use 'run_custom_sql_update' for Custom Objects (ODF_CA_*) only.
-3. **REST API**: Use 'call_rest_api' for System Objects (Projects, Tasks, Lookups, etc.).
-   ⚠️ **CRITICAL**: REST requires active session. If you get "No Active Session", inform the user to log in.
+⚠️ RULES:
+1. **SQL Read**: Use 'run_read_sql' for ALL queries. Always use WITH(NOLOCK) and TOP (not LIMIT).
+2. **SQL Write**: ONLY for Custom Objects (ODF_CA_*) using 'run_custom_sql_update'.
+3. **REST Write**: For System Objects (Tasks, Projects), use 'call_rest_api'.
 
-🔗 CLARITY JOIN PATTERNS:
+🔗 REST API STRATEGY:
+- **Create Task**: POST /ppm/rest/v1/tasks
+  Body: { "code": "TASK001", "name": "Task Name", "projectCode": "PRJ123", "status": "NOT_STARTED" }
+  
+- **Create Project**: POST /ppm/rest/v1/projects
+  Body: { "code": "PRJ001", "name": "Project Name", "managerUserName": "admin" }
 
-**Project to Task:**
-\`\`\`sql
-SELECT p.NAME, COUNT(t.PRID) as Tasks
-FROM INV_INVESTMENTS p WITH(NOLOCK)
-JOIN PRTASK t WITH(NOLOCK) ON p.ID = t.PRPROJECTID
-GROUP BY p.NAME
-\`\`\`
+- **Get Project**: GET /ppm/rest/v1/projects/{projectCode}
 
-**Project to Manager:**
-\`\`\`sql
-SELECT p.NAME, r.FULL_NAME as Manager
-FROM INV_INVESTMENTS p WITH(NOLOCK)
-JOIN SRM_RESOURCES r WITH(NOLOCK) ON p.MANAGER_ID = r.ID
-\`\`\`
-
-**Search Strategy:**
-When searching for a project/resource by name or code:
-\`\`\`sql
-WHERE (CODE = 'search_term' OR NAME LIKE '%search_term%')
-\`\`\`
-
-📡 REST API PATTERNS:
-
-**Create Task in Project:**
-1. First, find project code via SQL
-2. Then call: POST /ppm/rest/v1/projects/{projectCode}/tasks
-   Body: {code: "TASK001", name: "Task Name", status: "NOT_STARTED"}
-
-**Create Project:**
-POST /ppm/rest/v1/projects
-Body: {code: "PRJ001", name: "Project Name", managerId: "admin"}
-
-**Get Project:**
-GET /ppm/rest/v1/projects/{projectCode}
-
-**Create Lookup:**
-POST /ppm/rest/v1/lookups
-Body: {lookupType: "STATUS", lookupValue: "Active"}
-
-🛠️ WORKFLOW EXAMPLE:
-
-User: "Create task 'ai_test' in project 'this_proj'"
+💡 WORKFLOW Example: "Create task 'test_task' in project 'my_project'"
 
 Step 1: Find project code
 \`\`\`sql
 SELECT CODE FROM INV_INVESTMENTS WITH(NOLOCK)
-WHERE NAME = 'this_proj' OR CODE = 'this_proj'
+WHERE CODE = 'my_project' OR NAME = 'my_project'
 \`\`\`
 
 Step 2: Create task via REST
 \`\`\`
 call_rest_api(
   method: "POST",
-  endpoint: "/ppm/rest/v1/projects/{code_from_step1}/tasks",
-  body: {code: "ai_test", name: "ai_test", status: "NOT_STARTED"}
+  endpoint: "/ppm/rest/v1/tasks",
+  body: {
+    "code": "test_task",
+    "name": "test_task",
+    "projectCode": "{code_from_step1}",
+    "status": "NOT_STARTED"
+  }
 )
 \`\`\`
 
-⚠️ CRITICAL RULES:
-- Always use MS SQL syntax: TOP (not LIMIT), WITH(NOLOCK)
+🚨 CRITICAL:
 - Always verify project/resource codes via SQL before REST calls
-- If REST returns "No Active Session", tell user to log in
-- Never UPDATE system tables via SQL - use REST instead`;
+- Use flat endpoints (/ppm/rest/v1/tasks) over nested ones when possible
+- If REST fails, check network/session in error message`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'run_read_sql',
-        description: 'Execute SELECT query to read and analyze data. Read-only.',
+        description: 'Execute SELECT query to read data. Read-only.',
         parameters: {
           type: 'object',
           properties: { 
-            sqlQuery: { 
-              type: 'string', 
-              description: 'MS SQL SELECT query with TOP and WITH(NOLOCK)' 
-            } 
+            sqlQuery: { type: 'string', description: 'MS SQL SELECT with TOP and WITH(NOLOCK)' } 
           },
           required: ['sqlQuery']
         }
@@ -358,14 +378,11 @@ call_rest_api(
       type: 'function',
       function: {
         name: 'run_custom_sql_update',
-        description: 'Execute UPDATE or INSERT on Custom Objects (ODF_CA_*) only.',
+        description: 'Execute UPDATE/INSERT on Custom Objects (ODF_CA_*) only.',
         parameters: {
           type: 'object',
           properties: { 
-            sqlQuery: { 
-              type: 'string', 
-              description: 'UPDATE ODF_CA_... or INSERT INTO ODF_CA_... query' 
-            } 
+            sqlQuery: { type: 'string', description: 'UPDATE ODF_CA_... or INSERT INTO ODF_CA_...' } 
           },
           required: ['sqlQuery']
         }
@@ -375,23 +392,13 @@ call_rest_api(
       type: 'function',
       function: {
         name: 'call_rest_api',
-        description: 'Make REST API call to Clarity. Requires active session (user must be logged in).',
+        description: 'Call Clarity REST API. Requires active session.',
         parameters: {
           type: 'object',
           properties: {
-            method: { 
-              type: 'string', 
-              enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-              description: 'HTTP method'
-            },
-            endpoint: { 
-              type: 'string', 
-              description: 'API endpoint like /ppm/rest/v1/projects/{code}/tasks'
-            },
-            body: { 
-              type: 'object', 
-              description: 'JSON body for POST/PUT/PATCH'
-            }
+            method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE'] },
+            endpoint: { type: 'string', description: 'API endpoint like /ppm/rest/v1/tasks' },
+            body: { type: 'object', description: 'JSON body for POST/PUT' }
           },
           required: ['method', 'endpoint']
         }
@@ -401,15 +408,10 @@ call_rest_api(
       type: 'function',
       function: {
         name: 'get_schema',
-        description: 'Get database schema (columns and types) for any Clarity object.',
+        description: 'Get table columns definition.',
         parameters: {
           type: 'object',
-          properties: { 
-            objectCode: { 
-              type: 'string', 
-              description: 'Object code like project, task, vendor, etc.' 
-            } 
-          },
+          properties: { objectCode: { type: 'string' } },
           required: ['objectCode']
         }
       }
@@ -531,29 +533,13 @@ async function startHTTPServer() {
     };
 
     try {
-      // --------------------------------------------------------------------------
-      // ROBUST SESSION HANDLING
-      // --------------------------------------------------------------------------
-      let sessionCookie: string | null = null;
-
-      // Method 1: Direct cookies string (most common)
-      if (session?.cookies) {
-        sessionCookie = session.cookies;
-      } 
-      // Method 2: sessionId field (extension specific)
-      else if (session?.sessionId) {
-        sessionCookie = `JSESSIONID=${session.sessionId}`;
-      } 
-      // Method 3: Generic id field
-      else if (session?.id) {
-        sessionCookie = `JSESSIONID=${session.id}`;
-      }
+      // ROBUST COOKIE PARSING with Smart Cleaner
+      let rawSession = session?.cookies || session?.sessionId || session?.id || null;
+      const sessionCookie = formatSessionCookie(rawSession);
 
       if (sessionCookie) {
-        console.log('[Session] Found session cookie');
-        sendUpdate({ type: 'info', data: '🔐 Session Active (REST Enabled)' });
+        sendUpdate({ type: 'info', data: '🔐 Session Active (REST Ready)' });
       } else {
-        console.log('[Session] No session found');
         sendUpdate({ type: 'info', data: '🔓 Guest Mode (SQL Read-Only)' });
       }
 
@@ -569,7 +555,7 @@ async function startHTTPServer() {
   app.get('/health', (req, res) => {
     res.json({
       status: 'ready',
-      version: 'v5.1-production-openai',
+      version: 'v5.2-connectivity-fix',
       database: pool?.connected ? 'connected' : 'disconnected',
       objects: clarityObjects.size,
       ai: 'OpenAI GPT-4o',
@@ -578,8 +564,9 @@ async function startHTTPServer() {
         'sql-read',
         'sql-write-custom',
         'rest-api',
-        'robust-session',
-        'schema-discovery'
+        'smart-cookie-cleaner',
+        'ssl-bypass',
+        'increased-timeouts'
       ]
     });
   });
@@ -587,13 +574,13 @@ async function startHTTPServer() {
   app.listen(PORT, () => {
     console.log('');
     console.log('==========================================================');
-    console.log(`🚀 Clarity MCP v5.1 PRODUCTION (OpenAI)`);
+    console.log(`🚀 Clarity MCP v5.2 CONNECTIVITY FIX (OpenAI)`);
     console.log(`📡 Chat: http://localhost:${PORT}/api/chat`);
     console.log(`🏥 Health: http://localhost:${PORT}/health`);
     console.log(`📊 Objects: ${clarityObjects.size} loaded`);
     console.log(`🔗 Clarity: ${CLARITY_BASE_URL}`);
     console.log(`🤖 AI: OpenAI GPT-4o`);
-    console.log(`🛡️ Features: SQL + REST + Robust Sessions`);
+    console.log(`🛡️ Fixes: Smart Cookie + SSL Bypass + Timeouts`);
     console.log('==========================================================');
     console.log('');
   });
