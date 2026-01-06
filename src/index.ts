@@ -94,21 +94,22 @@ async function loadClarityObjects() {
   try {
     const db = await getPool();
     
-    // FIXED: Use ODF_OBJECTS as primary source (has correct column names)
-    const result = await db.request().query(`
+    // FIXED: Correct column names from actual Clarity schema
+    const query = `
       SELECT 
-        UPPER(code) as OBJECT_CODE,
-        name AS OBJECT_NAME,
-        database_table AS TABLE_NAME,
-        object_type AS OBJECT_TYPE,
-        description AS DESCRIPTION,
+        UPPER(o.code) as OBJECT_CODE,
+        s.OBJECT_NAME as OBJECT_NAME, 
+        o.database_table as TABLE_NAME,
+        s.OBJECT_TYPE_CODE as OBJECT_TYPE,
         'ID' as PK_COLUMN
-      FROM ODF_OBJECTS
-      WHERE is_active = 1
-      AND database_table IS NOT NULL
-      ORDER BY name
-    `);
+      FROM ODF_OBJECTS o
+      INNER JOIN CMN_SEC_OBJECTS s ON s.OBJECT_CODE = o.CODE
+      WHERE o.is_active = 1
+      AND o.database_table IS NOT NULL
+      ORDER BY s.OBJECT_NAME
+    `;
 
+    const result = await db.request().query(query);
     console.log(`[Objects] Loaded ${result.recordset.length} Clarity objects`);
 
     result.recordset.forEach((obj: any) => {
@@ -192,12 +193,44 @@ async function getObjectSchema(objectCode: string): Promise<string> {
 // ============================================================================
 async function getUserFromSession(session: any): Promise<string | null> {
   try {
+    const db = await getPool();
+
+    // Method 1: Try Session Cookie (Chrome Extension)
+    if (session?.cookies) {
+      const sessionMatch = session.cookies.match(/JSESSIONID=([^;]+)/);
+      if (sessionMatch) {
+        // FIXED: Clean Session ID - Remove trailing routing info (e.g., .worker1)
+        let sessionId = sessionMatch[1];
+        if (sessionId.includes('.')) {
+          sessionId = sessionId.split('.')[0];
+        }
+
+        console.log('[Auth] Checking Session ID:', sessionId);
+
+        const result = await db.request()
+          .input('sessionId', sessionId)
+          .query(`
+            SELECT TOP 1 
+              u.ID as USER_ID, 
+              u.USER_NAME
+            FROM CMN_SEC_USERS u
+            INNER JOIN CMN_SEC_USER_SESSIONS s ON s.USER_ID = u.ID
+            WHERE s.SESSION_ID = @sessionId
+            AND s.LAST_UPDATED_DATE > DATEADD(hour, -24, GETDATE())
+          `);
+
+        if (result.recordset.length > 0) {
+          console.log('[Auth] ✅ Authenticated via Cookie:', result.recordset[0].USER_NAME);
+          return result.recordset[0].USER_ID.toString();
+        }
+      }
+    }
+
+    // Method 2: Try Username
     if (session?.username) {
-      console.log('[Auth] Authenticating with username:', session.username);
+      console.log('[Auth] Checking Username:', session.username);
       
-      const db = await getPool();
-      
-      // FIXED: Use ID (not USER_ID) and USER_STATUS_ID = 1 (not IS_ACTIVE)
+      // Try exact match
       let result = await db.request()
         .input('username', session.username)
         .query(`
@@ -232,6 +265,7 @@ async function getUserFromSession(session: any): Promise<string | null> {
       }
       
       // Fallback: Admin user
+      // FIXED: Use GROUP_CODE instead of GROUP_NAME to avoid column errors
       console.warn('[Auth] ⚠️ User not found, trying admin fallback');
       result = await db.request()
         .query(`
@@ -241,7 +275,7 @@ async function getUserFromSession(session: any): Promise<string | null> {
           FROM CMN_SEC_USERS u
           INNER JOIN CMN_SEC_USER_GROUPS ug ON ug.USER_ID = u.ID
           INNER JOIN CMN_SEC_GROUPS g ON g.ID = ug.GROUP_ID
-          WHERE (g.GROUP_NAME LIKE '%Admin%' OR g.GROUP_CODE IN ('Admin', 'ProcessAdmin'))
+          WHERE g.GROUP_CODE IN ('Admin', 'ProcessAdmin', 'SystemAdmin')
           AND u.USER_STATUS_ID = 1
         `);
       
@@ -270,32 +304,7 @@ async function getUserFromSession(session: any): Promise<string | null> {
       return null;
     }
 
-    // Try session cookies
-    if (session?.cookies) {
-      const sessionMatch = session.cookies.match(/JSESSIONID=([^;]+)/);
-      if (!sessionMatch) return null;
-
-      const sessionId = sessionMatch[1];
-      const db = await getPool();
-      
-      const result = await db.request()
-        .input('sessionId', sessionId)
-        .query(`
-          SELECT TOP 1 
-            u.ID as USER_ID, 
-            u.USER_NAME
-          FROM CMN_SEC_USERS u
-          INNER JOIN CMN_SEC_USER_SESSIONS s ON s.USER_ID = u.ID
-          WHERE s.SESSION_ID = @sessionId
-          AND s.LAST_UPDATED_DATE > DATEADD(hour, -24, GETDATE())
-        `);
-
-      if (result.recordset.length > 0) {
-        console.log('[Auth] ✅ User from session:', result.recordset[0].USER_NAME);
-        return result.recordset[0].USER_ID.toString();
-      }
-    }
-
+    console.error('[Auth] ❌ No credentials provided');
     return null;
   } catch (error: any) {
     console.error('[Auth] Error:', error.message);
@@ -308,7 +317,7 @@ async function getUserPermissions(userId: string): Promise<UserSession['permissi
   try {
     const db = await getPool();
 
-    // Check if admin
+    // FIXED: Use GROUP_CODE instead of GROUP_NAME to avoid column errors
     const adminCheck = await db.request()
       .input('userId', userId)
       .query(`
@@ -316,7 +325,7 @@ async function getUserPermissions(userId: string): Promise<UserSession['permissi
         FROM CMN_SEC_USER_GROUPS ug
         INNER JOIN CMN_SEC_GROUPS g ON g.ID = ug.GROUP_ID
         WHERE ug.USER_ID = @userId
-        AND (g.GROUP_NAME LIKE '%Admin%' OR g.GROUP_CODE IN ('Admin', 'ProcessAdmin', 'SystemAdmin'))
+        AND g.GROUP_CODE IN ('Admin', 'ProcessAdmin', 'SystemAdmin')
       `);
 
     const isAdmin = adminCheck.recordset[0].is_admin > 0;
@@ -346,33 +355,35 @@ async function getUserPermissions(userId: string): Promise<UserSession['permissi
       .query(`
         SELECT DISTINCT
           ar.OBJECT_CODE,
-          o.OBJECT_NAME,
           MAX(CAST(ar.CAN_READ as INT)) as CAN_READ,
           MAX(CAST(ar.CAN_WRITE as INT)) as CAN_WRITE,
           MAX(CAST(ar.CAN_UPDATE as INT)) as CAN_UPDATE,
           MAX(CAST(ar.CAN_DELETE as INT)) as CAN_DELETE,
           MAX(CAST(ar.CAN_EXECUTE as INT)) as CAN_EXECUTE
         FROM CMN_SEC_ACCESS_RIGHTS ar
-        INNER JOIN CMN_SEC_OBJECTS o ON o.OBJECT_CODE = ar.OBJECT_CODE
         WHERE ar.PRINCIPAL_ID IN (
           SELECT GROUP_ID FROM CMN_SEC_USER_GROUPS WHERE USER_ID = @userId
           UNION
           SELECT @userId
         )
         AND ar.IS_ACTIVE = 1
-        GROUP BY ar.OBJECT_CODE, o.OBJECT_NAME
+        GROUP BY ar.OBJECT_CODE
       `);
 
     permsResult.recordset.forEach((perm: any) => {
-      permissions.set(perm.OBJECT_CODE, {
-        objectCode: perm.OBJECT_CODE,
-        objectName: perm.OBJECT_NAME,
-        canRead: perm.CAN_READ === 1,
-        canWrite: perm.CAN_WRITE === 1,
-        canUpdate: perm.CAN_UPDATE === 1,
-        canDelete: perm.CAN_DELETE === 1,
-        canExecute: perm.CAN_EXECUTE === 1
-      });
+      // Map back to known objects
+      const knownObj = clarityObjects.get(perm.OBJECT_CODE);
+      if (knownObj) {
+        permissions.set(perm.OBJECT_CODE, {
+          objectCode: perm.OBJECT_CODE,
+          objectName: knownObj.objectName,
+          canRead: perm.CAN_READ === 1,
+          canWrite: perm.CAN_WRITE === 1,
+          canUpdate: perm.CAN_UPDATE === 1,
+          canDelete: perm.CAN_DELETE === 1,
+          canExecute: perm.CAN_EXECUTE === 1
+        });
+      }
     });
 
     console.log(`[Permissions] Loaded permissions for ${permissions.size} objects`);
