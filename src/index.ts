@@ -488,13 +488,15 @@ app.post('/api/chat', async (req, res) => {
   res.end();
 });
 
-const PORT = 3001;
-app.listen(PORT, async () => {
+const PORT = parseInt(process.env.PORT || '3001');
+const HOST = '0.0.0.0'; // ← CRITICAL: Listen on all interfaces (Railway needs this!)
+
+app.listen(PORT, HOST, async () => {
   console.log('');
   console.log('==========================================================');
   console.log(`🚀 CLARITY MCP v16.0 UNSTOPPABLE`);
-  console.log(`📡 Server: http://localhost:${PORT}`);
-  console.log(`🏥 Health: http://localhost:${PORT}/health`);
+  console.log(`📡 Server: http://${HOST}:${PORT}`);
+  console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
   console.log('==========================================================');
   console.log('');
   
