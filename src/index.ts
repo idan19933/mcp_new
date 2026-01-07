@@ -3,12 +3,13 @@
 import sql from 'mssql';
 import express from 'express';
 import dotenv from 'dotenv';
-import cors from 'cors';
+import https from 'https';
+import http from 'http';
 
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v15.0 - UNIVERSAL TRUTH EDITION");
+console.log("🚀 CLARITY MCP v6.1 - SELF-HEALING EDITION (Smart Schema)");
 console.log("==========================================================");
 
 // ============================================================================
@@ -21,13 +22,62 @@ const DB_CONFIG = {
   server: process.env.DB_SERVER || '16.16.83.171',
   database: process.env.DB_NAME || 'niku',
   requestTimeout: 60000,
-  options: { 
-    encrypt: false, 
+  options: {
+    encrypt: false,
     trustServerCertificate: true,
     enableArithAbort: true
   },
   pool: { max: 20, min: 2, idleTimeoutMillis: 30000 }
 };
+
+const CLARITY_BASE_URL = process.env.CLARITY_URL || `http://${DB_CONFIG.server}:8080`; 
+const insecureAgent = new https.Agent({ rejectUnauthorized: false });
+
+// ============================================================================
+// DIAGNOSTIC: CONNECTIVITY PROBE (Runs on Startup)
+// ============================================================================
+async function probeConnectivity() {
+  console.log(`[Probe] Checking REST API accessibility at ${CLARITY_BASE_URL}...`);
+  return new Promise((resolve) => {
+    const req = http.get(`${CLARITY_BASE_URL}/niku/nu`, (res) => {
+      console.log(`[Probe] ✅ REST Service is REACHABLE (Status: ${res.statusCode})`);
+      resolve(true);
+    });
+    req.on('error', (e) => {
+      console.error(`[Probe] ❌ REST Service UNREACHABLE: ${e.message}`);
+      console.error(`[Probe] ⚠️ Note: SQL will work, but REST (Task creation) will fail.`);
+      resolve(false);
+    });
+    req.setTimeout(3000, () => { req.destroy(); resolve(false); });
+  });
+}
+
+// ============================================================================
+// TABLE MAP
+// ============================================================================
+const TABLE_MAP: Record<string, string> = {
+  'PROJECT': 'INV_INVESTMENTS',
+  'IDEA': 'INV_INVESTMENTS',
+  'TASK': 'PRTASK',
+  'RESOURCE': 'SRM_RESOURCES',
+  'TEAM': 'PRTEAM',
+  'TIMESHEET': 'PRTIMESHEET',
+  'RISK': 'RIM_RISKS',
+  'ISSUE': 'RIM_ISSUES',
+  'DEPARTMENT': 'CMN_DEPARTMENTS',
+  'LOOKUP': 'CMN_LOOKUPS_V',
+  'USER': 'CMN_SEC_USERS',
+  'VENDOR': 'ODF_CA_VENDOR',
+  'CONTRACT': 'ODF_CA_CONTRACT'
+};
+
+interface ClarityObject { 
+  objectCode: string; 
+  objectName: string; 
+  tableName: string; 
+}
+
+let clarityObjects: Map<string, ClarityObject> = new Map();
 
 // ============================================================================
 // DATABASE CONNECTION
@@ -42,619 +92,539 @@ async function getPool() {
     pool.on('error', (err: any) => console.error('Pool Error:', err));
     return pool;
   } catch (err) {
-    console.error('❌ DB Fail:', err);
+    console.error('❌ DB Connection Failed:', err);
     throw err;
   }
 }
 
-// ============================================================================
-// OBJECT MAP (Hardcoded - No DATABASE_TABLE column exists!)
-// ============================================================================
-interface ClarityObject { 
-  code: string; 
-  name: string; 
-  table: string; 
-}
-
-let clarityObjects: Map<string, ClarityObject> = new Map();
-
-// Known Core Mappings (These NEVER change in Clarity)
-const CORE_MAPPING: Record<string, string> = {
-  'PROJECT': 'INV_INVESTMENTS',
-  'IDEA': 'INV_INVESTMENTS',
-  'TASK': 'PRTASK',
-  'RESOURCE': 'SRM_RESOURCES',
-  'TEAM': 'PRTEAM',
-  'TIMESHEET': 'PRTIMESHEET',
-  'ASSIGNMENT': 'PRASSIGNMENT',
-  'USER': 'CMN_SEC_USERS',
-  'CHANGE': 'CHG_INVESTMENTS',
-  'INCIDENT': 'INC_INCIDENTS',
-  'ISSUE': 'ISS_ISSUES',
-  'RISK': 'RISK_RISKS',
-  'PROCESS': 'BPM_PROCESSES'
-};
-
 async function loadClarityObjects() {
-  console.log('[Universal] Mapping System Objects...');
+  console.log('[Objects] Building object map...');
   try {
     const db = await getPool();
-    
-    // Query ONLY CODE (no NAME, no IS_ACTIVE - they don't exist!)
-    const query = `
-      SELECT CODE
-      FROM ODF_OBJECTS WITH(NOLOCK)
-    `;
-    
-    const result = await db.request().query(query);
-    
-    result.recordset.forEach((row: any) => {
-      const code = row.CODE.toUpperCase();
-      let table = CORE_MAPPING[code];
-      
-      // If not a core object, assume Custom Object pattern
-      if (!table) {
-        table = `ODF_CA_${code}`;
-      }
-      
-      clarityObjects.set(code, {
-        code: code,
-        name: code, // Use CODE as name
-        table: table
+    const result = await db.request().query("SELECT code, name FROM ODF_OBJECTS WHERE is_active = 1");
+    result.recordset.forEach((obj: any) => {
+      const code = (obj.code || '').toUpperCase();
+      if (!code) return;
+      let tableName = TABLE_MAP[code] || `ODF_CA_${code}`;
+      clarityObjects.set(code, { 
+        objectCode: code, 
+        objectName: obj.name || code, 
+        tableName 
       });
     });
-
-    console.log(`✅ [Universal] Mapped ${clarityObjects.size} objects`);
-    console.log(`   Core Objects: ${Object.keys(CORE_MAPPING).length} (hardcoded)`);
-    console.log(`   Custom Objects: ${clarityObjects.size - Object.keys(CORE_MAPPING).length} (ODF_CA_ pattern)`);
-
-  } catch (error: any) {
-    console.error(`❌ [Universal] Mapping failed: ${error.message}`);
-    console.log('[Universal] Using minimal fallback...');
-    
-    // Minimal fallback
-    Object.entries(CORE_MAPPING).forEach(([code, table]) => {
-      clarityObjects.set(code, {
-        code: code,
-        name: code,
-        table: table
-      });
+    console.log(`✅ [Objects] Mapped ${clarityObjects.size} objects`);
+  } catch (error) {
+    console.warn('⚠️ [Objects] Using hardcoded map.');
+    Object.entries(TABLE_MAP).forEach(([k, v]) => {
+      clarityObjects.set(k, { objectCode: k, objectName: k, tableName: v });
     });
   }
 }
 
 // ============================================================================
-// TOOL 1: TABLE INVESTIGATOR (Schema Discovery)
+// HELPER: SMART SCHEMA SUGGESTER (SELF-HEALING!)
 // ============================================================================
-async function investigateTable(tableName: string): Promise<string> {
+async function findSimilarColumns(tableName: string, targetCol: string): Promise<string> {
   try {
     const db = await getPool();
-    
-    // 1. Verify table exists
-    const check = await db.request().query(`
-      SELECT OBJECT_ID('${tableName}') as ID
-    `);
-    
-    if (!check.recordset[0].ID) {
-      return `❌ Table '${tableName}' does not exist in database.`;
-    }
-
-    // 2. Get ALL columns
-    const cols = await db.request().query(`
-      SELECT 
-        COLUMN_NAME, 
-        DATA_TYPE, 
-        CHARACTER_MAXIMUM_LENGTH,
-        IS_NULLABLE
-      FROM INFORMATION_SCHEMA.COLUMNS WITH(NOLOCK)
-      WHERE TABLE_NAME = '${tableName}'
-      ORDER BY ORDINAL_POSITION
-    `);
-    
-    // 3. Categorize columns
-    const allCols = cols.recordset.map((c: any) => c.COLUMN_NAME);
-    
-    const keyCols = allCols.filter((c: string) => 
-      c.includes('ID') || c.includes('NAME') || c.includes('CODE')
-    );
-    
-    const statusCols = allCols.filter((c: string) => 
-      c.includes('STATUS') || c.includes('ACTIVE') || c.includes('STATE')
-    );
-    
-    const dateCols = allCols.filter((c: string) => 
-      c.includes('DATE') || c.includes('TIME')
-    );
-
-    return `✅ **Table: ${tableName}**
-
-**Total Columns:** ${allCols.length}
-
-**Key Columns:**
-${keyCols.length > 0 ? keyCols.join(', ') : 'None found'}
-
-**Status Columns:**
-${statusCols.length > 0 ? statusCols.join(', ') : 'None found'}
-
-**Date Columns:**
-${dateCols.length > 0 ? dateCols.slice(0, 5).join(', ') : 'None found'}
-
-**All Columns (first 50):**
-${allCols.slice(0, 50).join(', ')}`;
-
-  } catch (e: any) { 
-    return `❌ Error investigating table: ${e.message}`; 
-  }
-}
-
-// ============================================================================
-// TOOL 2: COLUMN SEARCH (Find specific columns)
-// ============================================================================
-async function findColumn(tableName: string, keyword: string): Promise<string> {
-  try {
-    const db = await getPool();
-    
-    const query = `
-      SELECT COLUMN_NAME, DATA_TYPE
-      FROM INFORMATION_SCHEMA.COLUMNS WITH(NOLOCK)
+    const result = await db.request().query(`
+      SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
       WHERE TABLE_NAME = '${tableName}' 
-      AND COLUMN_NAME LIKE '%${keyword.toUpperCase()}%'
+      AND (
+        COLUMN_NAME LIKE '%${targetCol}%' 
+        OR COLUMN_NAME LIKE '%STATUS%' 
+        OR COLUMN_NAME LIKE '%ACTIVE%'
+        OR COLUMN_NAME LIKE '%OPEN%'
+      )
       ORDER BY COLUMN_NAME
-    `;
+    `);
     
-    const res = await db.request().query(query);
-    
-    if (res.recordset.length === 0) {
-      return `No columns found in '${tableName}' matching '${keyword}'.
-
-**Suggestion:** Try broader keywords like:
-- For active records: STATUS, STATE, OPEN
-- For names: NAME, TITLE, DESCRIPTION
-- For codes: CODE, KEY, ID`;
+    if (result.recordset.length > 0) {
+      return result.recordset.map((r: any) => r.COLUMN_NAME).join(', ');
     }
-    
-    const found = res.recordset.map((r: any) => 
-      `${r.COLUMN_NAME} (${r.DATA_TYPE})`
-    ).join(', ');
-    
-    return `Found ${res.recordset.length} column(s): ${found}`;
-    
-  } catch (e: any) { 
-    return `❌ Error searching columns: ${e.message}`; 
+    return "No similar columns found.";
+  } catch { 
+    return "Unable to check schema."; 
   }
 }
 
 // ============================================================================
-// TOOL 3: OBJECT LOOKUP (Get table for object code)
+// SMART COOKIE FORMATTER
 // ============================================================================
-async function lookupObject(objectCode: string): Promise<string> {
-  const code = objectCode.toUpperCase();
-  const obj = clarityObjects.get(code);
-  
-  if (!obj) {
-    return `❌ Object '${objectCode}' not found.
+function formatSessionCookie(rawValue: any): string | null {
+  if (!rawValue) return null;
+  let val = String(rawValue).trim();
 
-**Available objects:** ${Array.from(clarityObjects.keys()).slice(0, 20).join(', ')}...`;
+  if (val.includes('JSESSIONID=')) {
+    const match = val.match(/JSESSIONID=([^;]+)/);
+    if (match) val = match[1];
   }
-  
-  return `✅ **Object: ${obj.code}**
-**Name:** ${obj.name}
-**Table:** ${obj.table}
+  else if (val.startsWith('sessionId=')) {
+    val = val.replace('sessionId=', '');
+  }
 
-**Next:** Use investigate_table('${obj.table}') to see columns.`;
+  val = val.replace(/['";]/g, '');
+  return `JSESSIONID=${val}`;
 }
 
 // ============================================================================
-// TOOL 4: SQL EXECUTION
+// TOOL 1: DYNAMIC SQL (WITH SELF-HEALING!)
 // ============================================================================
-async function executeServerSQL(sqlQuery: string): Promise<string> {
-  const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE'];
-  const upperSQL = sqlQuery.toUpperCase();
+async function executeDynamicQuery(sqlQuery: string): Promise<string> {
+  const forbidden = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'TRUNCATE', 'GRANT', 'EXEC'];
+  const upperSQL = sqlQuery.toUpperCase().trim();
   
-  if (forbidden.some(w => upperSQL.includes(` ${w} `) || upperSQL.includes(`\n${w} `))) {
-    return '❌ Security: Read-only mode. Use browser actions for writes.';
+  if (!upperSQL.startsWith('SELECT') && !upperSQL.startsWith('WITH')) {
+    return '❌ Security: Only SELECT queries allowed.';
   }
   
+  if (forbidden.some(w => upperSQL.includes(` ${w} `))) {
+    return '❌ Security: Forbidden keyword detected.';
+  }
+  
+  if (upperSQL.includes('LIMIT ')) {
+    return `❌ SYNTAX: Use 'TOP n' instead of 'LIMIT n'.`;
+  }
+
   try {
     const db = await getPool();
-    console.log(`[SQL] ${sqlQuery}`);
-    
+    console.log(`[SQL-READ] ${sqlQuery}`);
     const result = await db.request().query(sqlQuery);
     
     if (result.recordset.length === 0) {
-      return 'Query executed successfully. No results found.';
+      return 'Query executed. No results found.';
     }
     
     return JSON.stringify(result.recordset.slice(0, 100), null, 2);
+  } catch (error: any) {
+    console.error(`[SQL Error] ${error.message}`);
     
-  } catch (e: any) { 
-    return `❌ SQL Error: ${e.message}
+    // --- SMART ERROR HANDLING - SELF-HEALING! ---
+    if (error.message.includes("Invalid column name")) {
+      const badColMatch = error.message.match(/'([^']+)'/);
+      const badCol = badColMatch ? badColMatch[1] : "unknown";
+      
+      // Extract table name from query
+      const tableMatch = sqlQuery.match(/FROM\s+([A-Z0-9_]+)/i);
+      const tableName = tableMatch ? tableMatch[1] : null;
 
-**Tip:** Check:
-- Table name spelling
-- Column name spelling  
-- Use WITH(NOLOCK) for reads
-- Use TOP instead of LIMIT`; 
+      let suggestion = "";
+      if (tableName) {
+        // Special handling for "ACTIVE" confusion
+        if (badCol.toUpperCase() === 'IS_ACTIVE') {
+           if (tableName.toUpperCase().includes('PRTASK')) {
+             suggestion = "For Tasks, use 'PRSTATUS != 2' (2=Completed) OR 'IS_OPEN_FOR_TE = 1'.";
+           }
+           else if (tableName.toUpperCase().includes('INV_INVESTMENTS')) {
+             suggestion = "For Projects, 'IS_ACTIVE' should exist. Try checking the exact column name with get_schema.";
+           }
+           else {
+             const similar = await findSimilarColumns(tableName, 'ACTIVE');
+             suggestion = `Similar columns in ${tableName}: [${similar}]`;
+           }
+        } else {
+           // Generic column search
+           const similar = await findSimilarColumns(tableName, badCol.substring(0, 4));
+           suggestion = `Similar columns in ${tableName}: ${similar}`;
+        }
+      }
+
+      return `❌ SQL Schema Error: Column '${badCol}' not found${tableName ? ` in table '${tableName}'` : ''}.
+
+💡 SMART TIP: ${suggestion}
+
+🔧 ACTION: Update your query with the correct column name and retry automatically.`;
+    }
+
+    return `❌ SQL Error: ${error.message}`; 
   }
 }
 
 // ============================================================================
-// TOOL 5: BROWSER COMMAND (Remote Control)
+// TOOL 2: REST API
 // ============================================================================
-async function triggerBrowserAction(
+async function callClarityREST(
   method: string, 
   endpoint: string, 
   body: any, 
-  sendUpdate: any
+  sessionCookie: string | null
 ): Promise<string> {
-  const browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
-  
-  console.log(`[Browser-CMD] ${method} ${browserUrl}`);
-  
-  sendUpdate({
-    type: 'client_execute',
-    data: { 
-      method, 
-      url: browserUrl, 
-      body, 
-      headers: { 'Content-Type': 'application/json' } 
+  if (!sessionCookie) {
+    return '❌ Error: No Active Session. Please log in via Extension.';
+  }
+
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const url = `${CLARITY_BASE_URL}${cleanEndpoint}`;
+
+  console.log(`[REST] ${method} ${url}`);
+  if (body) console.log(`[REST] Body:`, JSON.stringify(body, null, 2));
+
+  try {
+    const fetchOptions: any = {
+      method: method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': sessionCookie,
+        'Accept': 'application/json'
+      },
+      body: body ? JSON.stringify(body) : undefined
+    };
+
+    if (url.startsWith('https')) {
+      fetchOptions.agent = insecureAgent;
     }
-  });
-  
-  return `✅ **Command sent to browser**
 
-**Action:** ${method} ${browserUrl}
+    const response = await fetch(url, fetchOptions);
+    const text = await response.text();
+    
+    console.log(`[REST] Status: ${response.status}`);
+    
+    if (!response.ok) {
+      if (response.status === 404) {
+        return `❌ Error 404: Endpoint not found. 
 
-**Check browser console (F12) for execution result!**`;
+💡 TIP: Make sure you're using numeric ID, not string code.
+Example: /ppm/rest/v1/projects/5004001/tasks (not /projects/this_proj/tasks)`;
+      }
+      return `❌ API Error (${response.status}): ${text.substring(0, 400)}`;
+    }
+
+    try {
+      const json = JSON.parse(text);
+      return JSON.stringify(json, null, 2);
+    } catch {
+      return text;
+    }
+  } catch (error: any) {
+    console.error(`[Network Error] ${error.message}`);
+    return `❌ Network Error: ${error.message}
+
+**Troubleshooting:**
+- Check if Clarity server is reachable from this network
+- Verify CLARITY_URL: ${CLARITY_BASE_URL}
+- Check firewall/VPN settings`;
+  }
 }
 
 // ============================================================================
-// AI AGENT LOOP (Multi-turn Reasoning)
+// TOOL 3: SCHEMA HELPER
 // ============================================================================
-async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => void) {
+async function getObjectSchema(objectCode: string): Promise<string> {
+  const obj = clarityObjects.get(objectCode.toUpperCase());
+  if (!obj) return `Object '${objectCode}' not found. Available objects: ${Array.from(clarityObjects.keys()).slice(0, 10).join(', ')}...`;
+  
+  try {
+    const db = await getPool();
+    const q = `
+      SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_NAME = '${obj.tableName}'
+      ORDER BY ORDINAL_POSITION
+    `;
+    const res = await db.request().query(q);
+    
+    return JSON.stringify({ 
+      object: obj.objectName, 
+      table: obj.tableName, 
+      columnCount: res.recordset.length,
+      columns: res.recordset 
+    }, null, 2);
+  } catch (e: any) { 
+    return `Error getting schema: ${e.message}`; 
+  }
+}
+
+// ============================================================================
+// AI AGENT LOOP (SELF-HEALING BRAIN!)
+// ============================================================================
+async function runAIAgentLoop(
+  userMessage: string, 
+  sessionCookie: string | null, 
+  sendUpdate: (data: any) => void
+) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
   if (clarityObjects.size === 0) await loadClarityObjects();
 
-  const systemPrompt = `You are **Clarity Sherlock** - A database detective.
+  const systemPrompt = `You are a Clarity PPM Expert with SELF-HEALING abilities.
 
-🔍 **YOUR INVESTIGATION METHOD:**
+🕵️‍♂️ **CRITICAL: "ACTIVE" LOGIC BY OBJECT TYPE:**
 
-1. **TRANSLATE**: Object code → Table name
-   - Use lookup_object('PROJECT') → INV_INVESTMENTS
-   
-2. **VERIFY**: Check table structure
-   - Use investigate_table('INV_INVESTMENTS') → See all columns
-   
-3. **SEARCH**: Find specific columns
-   - Use find_column('PRTASK', 'STATUS') → PRSTATUS
-   
-4. **EXECUTE**: Run perfect SQL
-   - execute_server_sql("SELECT...") → Results
+**Tasks (PRTASK):**
+- ❌ DO NOT use 'IS_ACTIVE' (doesn't exist!)
+- ✅ Use: \`PRSTATUS != 2\` (2 = Completed)
+- ✅ Or: \`IS_OPEN_FOR_TE = 1\` (Open for time entry)
 
-🧠 **CORE TABLE MAP:**
-- PROJECT/IDEA → INV_INVESTMENTS
-- TASK → PRTASK
-- RESOURCE → SRM_RESOURCES
-- ASSIGNMENT → PRASSIGNMENT
-- Custom Objects → ODF_CA_{CODE}
+**Projects (INV_INVESTMENTS):**
+- ✅ Use: \`IS_ACTIVE = 1\`
+- If fails, use get_schema to check exact column name
 
-💡 **INVESTIGATION PATTERN:**
+**Resources (SRM_RESOURCES):**
+- ✅ Use: \`IS_ACTIVE = 1\`
+
+🛠️ **SELF-HEALING WORKFLOW:**
+
+1. **Try your best query first**
+2. **If it fails with "Invalid column":**
+   - READ the error message carefully
+   - The system suggests the correct column
+   - IMMEDIATELY retry with the corrected column
+   - DO NOT ask the user for help
+3. **Success!**
+
+💡 **EXAMPLE - Self-Healing in Action:**
 
 User: "How many active tasks?"
 
-Step 1: lookup_object('TASK')
-→ Table: PRTASK
+Attempt 1:
+\`SELECT COUNT(*) FROM PRTASK WHERE IS_ACTIVE = 1\`
+→ ❌ Error: "Column 'IS_ACTIVE' not found. TIP: Use 'PRSTATUS != 2' or 'IS_OPEN_FOR_TE = 1'"
 
-Step 2: find_column('PRTASK', 'ACTIVE')
-→ No results
+Attempt 2 (AUTO-RETRY):
+\`SELECT COUNT(*) FROM PRTASK WHERE PRSTATUS != 2\`
+→ ✅ Success! Returns count
 
-Step 3: find_column('PRTASK', 'STATUS')
-→ Found: PRSTATUS
+🎯 **ID-FIRST FOR REST:**
+- Always get numeric ID via SQL before REST calls
+- Example: \`SELECT ID FROM INV_INVESTMENTS WHERE CODE='proj'\`
+- Then: POST /ppm/rest/v1/projects/{ID}/tasks
 
-Step 4: execute_server_sql
-→ SELECT COUNT(*) FROM PRTASK WITH(NOLOCK) WHERE PRSTATUS != 2
-
-⚠️ **CRITICAL RULES:**
-- ALWAYS use WITH(NOLOCK) in SELECT
-- Use TOP not LIMIT
-- Find numeric IDs before REST calls
-- Explain your investigation steps
-- If column not found, try broader keywords`;
+⚠️ **RULES:**
+- Use WITH(NOLOCK) in SQL queries
+- Use TOP (not LIMIT)
+- Self-correct automatically when schema errors occur
+- Never give up after first error - always retry with fix`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
-        name: 'lookup_object',
-        description: 'Get table name for an object code (PROJECT, TASK, etc.)',
-        parameters: { 
-          type: 'object', 
-          properties: { 
-            objectCode: { 
-              type: 'string',
-              description: 'Object code like PROJECT, TASK, RESOURCE'
-            } 
-          }, 
-          required: ['objectCode'] 
-        }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'investigate_table',
-        description: 'Get all columns and structure of a table',
-        parameters: { 
-          type: 'object', 
-          properties: { 
-            tableName: { 
-              type: 'string',
-              description: 'Table name like INV_INVESTMENTS, PRTASK'
-            } 
-          }, 
-          required: ['tableName'] 
-        }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'find_column',
-        description: 'Search for column name by keyword in a specific table',
-        parameters: { 
-          type: 'object', 
-          properties: { 
-            tableName: { 
-              type: 'string',
-              description: 'Table name to search'
-            }, 
-            keyword: { 
-              type: 'string',
-              description: 'Search keyword like STATUS, ACTIVE, NAME'
-            } 
-          }, 
-          required: ['tableName', 'keyword'] 
-        }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'execute_server_sql',
-        description: 'Execute SELECT query on database',
-        parameters: { 
-          type: 'object', 
+        name: 'run_read_sql',
+        description: 'Execute SELECT query. If it fails with schema error, the system will suggest fixes - retry immediately with the correction!',
+        parameters: {
+          type: 'object',
           properties: { 
             sqlQuery: { 
               type: 'string',
-              description: 'MS SQL SELECT with WITH(NOLOCK) and TOP'
+              description: 'MS SQL SELECT query with WITH(NOLOCK) and TOP'
             } 
-          }, 
-          required: ['sqlQuery'] 
+          },
+          required: ['sqlQuery']
         }
       }
     },
     {
       type: 'function',
       function: {
-        name: 'trigger_browser_action',
-        description: 'Send command to browser for CREATE/UPDATE operations',
+        name: 'call_rest_api',
+        description: 'Call Clarity REST API. CRITICAL: Use numeric IDs (not string codes) in paths!',
         parameters: {
-          type: 'object', 
-          properties: { 
-            method: {
+          type: 'object',
+          properties: {
+            method: { 
+              type: 'string', 
+              enum: ['GET', 'POST', 'PUT', 'DELETE']
+            },
+            endpoint: { 
               type: 'string',
-              enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']
-            }, 
-            endpoint: {
-              type: 'string',
-              description: 'API endpoint with numeric ID, e.g., /projects/5004001/tasks'
-            }, 
-            body: {
+              description: 'API endpoint with NUMERIC ID, e.g., /ppm/rest/v1/projects/5004001/tasks'
+            },
+            body: { 
               type: 'object',
-              description: 'JSON payload'
+              description: 'JSON payload for POST/PUT'
+            }
+          },
+          required: ['method', 'endpoint']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'get_schema',
+        description: 'Get database schema (columns, types) for any object. Use this to verify column names BEFORE writing SQL.',
+        parameters: {
+          type: 'object',
+          properties: { 
+            objectCode: { 
+              type: 'string',
+              description: 'Object code like task, project, resource, etc.'
             } 
-          }, 
-          required: ['method', 'endpoint'] 
+          },
+          required: ['objectCode']
         }
       }
     }
   ];
 
   let messages: any[] = [
-    { role: 'system', content: systemPrompt }, 
+    { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage }
   ];
 
-  // Multi-turn reasoning loop (up to 10 iterations)
   let iteration = 0;
-  const MAX_ITERATIONS = 10;
-  const REQUEST_TIMEOUT = 25000; // 25 seconds per request
-  
-  while (iteration < MAX_ITERATIONS) {
+  while (iteration < 10) {
     iteration++;
-    sendUpdate({ type: 'thinking', data: `Investigating... (${iteration}/${MAX_ITERATIONS})` });
+    sendUpdate({ type: 'thinking', data: `Processing... (${iteration}/10)` });
 
-    try {
-      // Create abort controller for timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        messages: messages,
+        tools: tools,
+        tool_choice: 'auto'
+      })
+    });
 
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json', 
-          'Authorization': `Bearer ${OPENAI_API_KEY}` 
-        },
-        body: JSON.stringify({ 
-          model: 'gpt-4o', 
-          messages, 
-          tools,
-          tool_choice: 'auto'
-        }),
-        signal: controller.signal
-      });
+    const data: any = await response.json();
+    const msg = data.choices?.[0]?.message;
 
-      clearTimeout(timeoutId);
+    if (!msg) throw new Error('Invalid AI response');
 
-      if (!response.ok) {
-        throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data: any = await response.json();
-      const msg = data.choices?.[0]?.message;
-
-      if (!msg) {
-        throw new Error('Invalid AI response - no message');
-      }
-
-      // Tool calls - continue investigation
-      if (msg.tool_calls?.length > 0) {
-        messages.push(msg);
+    if (msg.tool_calls?.length > 0) {
+      messages.push(msg);
+      
+      for (const call of msg.tool_calls) {
+        const fn = call.function.name;
+        const args = JSON.parse(call.function.arguments);
+        sendUpdate({ type: 'tool', data: `🔧 ${fn}` });
         
-        for (const call of msg.tool_calls) {
-          const fn = call.function.name;
-          let args;
-          
-          try {
-            args = JSON.parse(call.function.arguments);
-          } catch (e) {
-            console.error('[Tool] Failed to parse arguments:', call.function.arguments);
-            args = {};
+        let res = '';
+        try {
+          if (fn === 'run_read_sql') {
+            res = await executeDynamicQuery(args.sqlQuery);
+          }
+          else if (fn === 'call_rest_api') {
+            res = await callClarityREST(args.method, args.endpoint, args.body, sessionCookie);
+          }
+          else if (fn === 'get_schema') {
+            res = await getObjectSchema(args.objectCode);
+          }
+          else {
+            res = `Unknown tool: ${fn}`;
           }
           
-          sendUpdate({ type: 'tool', data: `🔍 ${fn}` });
-          
-          let res = '';
-          try {
-            if (fn === 'lookup_object') {
-              res = await lookupObject(args.objectCode || '');
-            }
-            else if (fn === 'investigate_table') {
-              res = await investigateTable(args.tableName || '');
-            }
-            else if (fn === 'find_column') {
-              res = await findColumn(args.tableName || '', args.keyword || '');
-            }
-            else if (fn === 'execute_server_sql') {
-              res = await executeServerSQL(args.sqlQuery || '');
-            }
-            else if (fn === 'trigger_browser_action') {
-              res = await triggerBrowserAction(args.method || 'GET', args.endpoint || '/', args.body, sendUpdate);
-            }
-            else {
-              res = `Unknown tool: ${fn}`;
-            }
-            
-            sendUpdate({ type: 'step', data: '✅' });
-          } catch (e: any) {
-            console.error(`[Tool] Error in ${fn}:`, e);
-            res = `Error: ${e.message}`;
-            sendUpdate({ type: 'step', data: '❌' });
-          }
-          
-          messages.push({ 
-            role: 'tool', 
-            tool_call_id: call.id, 
-            content: res 
-          });
+          sendUpdate({ type: 'step', data: '✅ Done' });
+        } catch (e: any) { 
+          res = `Error: ${e.message}`;
+          sendUpdate({ type: 'step', data: '❌ Error' });
         }
         
-        // Continue loop for next iteration
-        continue;
-      }
-
-      // Final answer
-      if (msg.content) {
-        sendUpdate({ type: 'complete', data: msg.content });
-        return msg.content;
+        messages.push({ 
+          role: 'tool', 
+          tool_call_id: call.id, 
+          content: res 
+        });
       }
       
-      break;
-      
-    } catch (e: any) {
-      console.error(`[AI] Error in iteration ${iteration}:`, e);
-      
-      if (e.name === 'AbortError') {
-        sendUpdate({ type: 'error', data: 'Request timeout - please try a simpler question' });
-      } else {
-        sendUpdate({ type: 'error', data: `Error: ${e.message}` });
-      }
-      
-      return `Error after ${iteration} iterations: ${e.message}`;
+      continue;
     }
+
+    if (msg.content) {
+      sendUpdate({ type: 'complete', data: msg.content });
+      return msg.content;
+    }
+    
+    break;
   }
   
-  return 'Investigation complete (max iterations reached)';
+  return 'Maximum iterations reached';
 }
 
 // ============================================================================
-// SERVER SETUP
+// HTTP SERVER
 // ============================================================================
-const app = express();
-
-// CORS first!
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
-}));
-
-app.use(express.json());
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ready',
-    version: 'v15.0-universal-truth',
-    database: pool?.connected ? 'connected' : 'disconnected',
-    objects: clarityObjects.size,
-    coreObjects: Object.keys(CORE_MAPPING).length,
-    features: [
-      'hardcoded-mapping',
-      'schema-investigation',
-      'column-search',
-      'multi-turn-reasoning',
-      'remote-control'
-    ]
+async function startHTTPServer() {
+  const app = express();
+  const PORT = parseInt(process.env.PORT || '3001');
+  
+  app.use(express.json());
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') return res.status(200).end();
+    next();
   });
-});
 
-// Chat endpoint
-app.post('/api/chat', async (req, res) => {
-  console.log('[Chat] Request received');
-  
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*'
-  });
-  
-  const send = (d: any) => res.write(`data: ${JSON.stringify(d)}\n\n`);
-  
-  try { 
-    await runAIAgentLoop(req.body.message, send); 
-  } catch (e: any) { 
-    send({ type: 'error', data: e.message }); 
-  }
-  
-  res.end();
-});
-
-const PORT = 3001;
-app.listen(PORT, async () => {
-  console.log('');
-  console.log('==========================================================');
-  console.log(`🚀 Clarity MCP v15.0 UNIVERSAL TRUTH`);
-  console.log(`📡 Server: http://localhost:${PORT}`);
-  console.log(`🏥 Health: http://localhost:${PORT}/health`);
-  console.log(`🕵️ Investigation: Schema-based discovery`);
-  console.log(`🗺️ Mapping: Hardcoded core + ODF_CA_ pattern`);
-  console.log(`🎮 Control: Remote browser execution`);
-  console.log('==========================================================');
-  console.log('');
-  
+  await probeConnectivity();
   await getPool();
   await loadClarityObjects();
+
+  app.post('/api/chat', async (req, res) => {
+    const { message, session } = req.body;
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    });
+
+    const sendUpdate = (data: any) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      let rawSession = session?.cookies || session?.sessionId || session?.id || null;
+      const sessionCookie = formatSessionCookie(rawSession);
+
+      if (sessionCookie) {
+        console.log('[Session] Active - REST enabled');
+        sendUpdate({ type: 'info', data: '🔐 Session Ready' });
+      } else {
+        console.log('[Session] Guest mode');
+        sendUpdate({ type: 'info', data: '🔓 Guest Mode' });
+      }
+
+      await runAIAgentLoop(message, sessionCookie, sendUpdate);
+      
+    } catch (error: any) {
+      sendUpdate({ type: 'error', data: error.message });
+    }
+
+    res.end();
+  });
+
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'ready',
+      version: 'v6.1-self-healing',
+      database: pool?.connected ? 'connected' : 'disconnected',
+      objects: clarityObjects.size,
+      ai: 'OpenAI GPT-4o',
+      clarityUrl: CLARITY_BASE_URL,
+      features: [
+        'self-healing-sql',
+        'smart-schema-detection',
+        'auto-error-recovery',
+        'connectivity-probe',
+        'id-first-logic',
+        'cookie-cleaning',
+        'ssl-bypass'
+      ]
+    });
+  });
+
+  app.listen(PORT, () => {
+    console.log('');
+    console.log('==========================================================');
+    console.log(`🚀 Clarity MCP v6.1 SELF-HEALING EDITION`);
+    console.log(`📡 Chat: http://localhost:${PORT}/api/chat`);
+    console.log(`🏥 Health: http://localhost:${PORT}/health`);
+    console.log(`📊 Objects: ${clarityObjects.size} loaded`);
+    console.log(`🔗 Clarity: ${CLARITY_BASE_URL}`);
+    console.log(`🤖 AI: OpenAI GPT-4o (Self-Healing)`);
+    console.log(`🔧 Features: Auto-recovery + Smart Schema + Connectivity Probe`);
+    console.log('==========================================================');
+    console.log('');
+  });
+}
+
+startHTTPServer().catch((error) => {
+  console.error('❌ Fatal Error:', error);
+  process.exit(1);
 });
