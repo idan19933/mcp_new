@@ -80,11 +80,10 @@ async function loadClarityObjects() {
   try {
     const db = await getPool();
     
-    // Query only CODE and NAME (DATABASE_TABLE doesn't exist!)
+    // Query ONLY CODE (no NAME, no IS_ACTIVE - they don't exist!)
     const query = `
-      SELECT CODE, NAME 
+      SELECT CODE
       FROM ODF_OBJECTS WITH(NOLOCK)
-      WHERE IS_ACTIVE = 1
     `;
     
     const result = await db.request().query(query);
@@ -100,7 +99,7 @@ async function loadClarityObjects() {
       
       clarityObjects.set(code, {
         code: code,
-        name: row.NAME,
+        name: code, // Use CODE as name
         table: table
       });
     });
