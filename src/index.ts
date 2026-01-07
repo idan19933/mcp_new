@@ -8,7 +8,7 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v13.0 - SHERLOCK ARCHITECT (Deep Discovery)");
+console.log("🚀 CLARITY MCP v15.0 - UNIVERSAL TRUTH EDITION");
 console.log("==========================================================");
 
 // ============================================================================
@@ -48,259 +48,239 @@ async function getPool() {
 }
 
 // ============================================================================
-// DYNAMIC OBJECT DISCOVERY (Sherlock Intelligence!)
+// OBJECT MAP (Hardcoded - No DATABASE_TABLE column exists!)
 // ============================================================================
 interface ClarityObject { 
   code: string; 
   name: string; 
-  type: string; 
   table: string; 
-  source: string; 
 }
 
 let clarityObjects: Map<string, ClarityObject> = new Map();
 
+// Known Core Mappings (These NEVER change in Clarity)
+const CORE_MAPPING: Record<string, string> = {
+  'PROJECT': 'INV_INVESTMENTS',
+  'IDEA': 'INV_INVESTMENTS',
+  'TASK': 'PRTASK',
+  'RESOURCE': 'SRM_RESOURCES',
+  'TEAM': 'PRTEAM',
+  'TIMESHEET': 'PRTIMESHEET',
+  'ASSIGNMENT': 'PRASSIGNMENT',
+  'USER': 'CMN_SEC_USERS',
+  'CHANGE': 'CHG_INVESTMENTS',
+  'INCIDENT': 'INC_INCIDENTS',
+  'ISSUE': 'ISS_ISSUES',
+  'RISK': 'RISK_RISKS',
+  'PROCESS': 'BPM_PROCESSES'
+};
+
 async function loadClarityObjects() {
-  console.log('[Sherlock] Investigating System Metadata...');
+  console.log('[Universal] Mapping System Objects...');
   try {
     const db = await getPool();
     
-    // 1. INVESTIGATE OBJECTS (Safe query - no CMN_SEC_OBJECTS join)
-    const objectQuery = `
-      SELECT 
-        CODE, 
-        NAME,
-        'OBJECT' as OBJECT_TYPE_CODE,
-        DATABASE_TABLE
+    // Query only CODE and NAME (DATABASE_TABLE doesn't exist!)
+    const query = `
+      SELECT CODE, NAME 
       FROM ODF_OBJECTS WITH(NOLOCK)
       WHERE IS_ACTIVE = 1
     `;
     
-    const objResult = await db.request().query(objectQuery);
+    const result = await db.request().query(query);
     
-    objResult.recordset.forEach((row: any) => {
+    result.recordset.forEach((row: any) => {
       const code = row.CODE.toUpperCase();
-      let table = row.DATABASE_TABLE;
+      let table = CORE_MAPPING[code];
       
-      // Fallback logic if database_table is null
+      // If not a core object, assume Custom Object pattern
       if (!table) {
-        if (code === 'PROJECT') table = 'INV_INVESTMENTS';
-        else if (code === 'IDEA') table = 'INV_INVESTMENTS';
-        else if (code === 'TASK') table = 'PRTASK';
-        else if (code === 'RESOURCE') table = 'SRM_RESOURCES';
-        else table = `ODF_CA_${code}`;
+        table = `ODF_CA_${code}`;
       }
       
       clarityObjects.set(code, {
         code: code,
         name: row.NAME,
-        type: row.OBJECT_TYPE_CODE,
-        table: table,
-        source: 'OBJECT'
+        table: table
       });
     });
 
-    // 2. INVESTIGATE NSQL QUERIES (For Reports/Portlets)
-    try {
-      const nsqlQuery = `SELECT code, name FROM CMN_NSQL_QUERIES WITH(NOLOCK)`;
-      const nsqlResult = await db.request().query(nsqlQuery);
-      nsqlResult.recordset.forEach((row: any) => {
-        const code = row.code.toUpperCase();
-        if (!clarityObjects.has(code)) {
-          clarityObjects.set(code, { 
-            code, 
-            name: row.name, 
-            type: 'NSQL', 
-            table: 'CMN_NSQL_QUERIES', 
-            source: 'NSQL' 
-          });
-        }
-      });
-    } catch (e: any) {
-      console.log('[Sherlock] NSQL investigation skipped:', e.message);
-    }
+    console.log(`✅ [Universal] Mapped ${clarityObjects.size} objects`);
+    console.log(`   Core Objects: ${Object.keys(CORE_MAPPING).length} (hardcoded)`);
+    console.log(`   Custom Objects: ${clarityObjects.size - Object.keys(CORE_MAPPING).length} (ODF_CA_ pattern)`);
 
-    // 3. INVESTIGATE LOOKUPS
-    try {
-      const lookupQuery = `SELECT lookup_type, lookup_name FROM CMN_LOOKUP_TYPES WITH(NOLOCK)`;
-      const lookupResult = await db.request().query(lookupQuery);
-      lookupResult.recordset.forEach((row: any) => {
-        const code = row.lookup_type.toUpperCase();
-        if (!clarityObjects.has(code)) {
-          clarityObjects.set(code, { 
-            code, 
-            name: row.lookup_name, 
-            type: 'LOOKUP', 
-            table: 'CMN_LOOKUPS_V', 
-            source: 'LOOKUP' 
-          });
-        }
-      });
-    } catch (e: any) {
-      console.log('[Sherlock] Lookup investigation skipped:', e.message);
-    }
-
-    console.log(`✅ [Sherlock] Investigation Complete: ${clarityObjects.size} definitions found.`);
   } catch (error: any) {
-    console.error(`❌ [Sherlock] Investigation Failed: ${error.message}`);
-    console.log('[Sherlock] Using minimal fallback...');
+    console.error(`❌ [Universal] Mapping failed: ${error.message}`);
+    console.log('[Universal] Using minimal fallback...');
     
     // Minimal fallback
-    clarityObjects.set('PROJECT', { code: 'PROJECT', name: 'Project', type: 'OBJECT', table: 'INV_INVESTMENTS', source: 'FALLBACK' });
-    clarityObjects.set('TASK', { code: 'TASK', name: 'Task', type: 'OBJECT', table: 'PRTASK', source: 'FALLBACK' });
-    clarityObjects.set('RESOURCE', { code: 'RESOURCE', name: 'Resource', type: 'OBJECT', table: 'SRM_RESOURCES', source: 'FALLBACK' });
+    Object.entries(CORE_MAPPING).forEach(([code, table]) => {
+      clarityObjects.set(code, {
+        code: code,
+        name: code,
+        table: table
+      });
+    });
   }
 }
 
 // ============================================================================
-// TOOL 1: DEEP INVESTIGATION (The "Sherlock" Tool)
+// TOOL 1: TABLE INVESTIGATOR (Schema Discovery)
 // ============================================================================
-async function investigateObject(identifier: string): Promise<string> {
+async function investigateTable(tableName: string): Promise<string> {
   try {
     const db = await getPool();
-    const search = identifier.toUpperCase();
     
-    let report = `🕵️ **Investigation Report: ${search}**\n\n`;
-
-    // 1. Check Object Definition
-    const obj = clarityObjects.get(search);
-    if (obj) {
-      report += `**Type:** ${obj.type} (${obj.source})\n`;
-      report += `**Name:** ${obj.name}\n`;
-      report += `**Table:** ${obj.table}\n`;
-      
-      // If it's a table, get column count
-      if (obj.table && obj.table !== 'N/A' && !obj.table.includes('CMN_')) {
-        try {
-          const countRes = await db.request().query(`
-            SELECT COUNT(*) as C 
-            FROM INFORMATION_SCHEMA.COLUMNS WITH(NOLOCK)
-            WHERE TABLE_NAME = '${obj.table}'
-          `);
-          report += `**Columns:** ${countRes.recordset[0].C} columns available.\n`;
-        } catch (e) {
-          report += `**Columns:** Unable to count.\n`;
-        }
-      }
-    } else {
-      report += `**Status:** Not found in system registry.\n`;
+    // 1. Verify table exists
+    const check = await db.request().query(`
+      SELECT OBJECT_ID('${tableName}') as ID
+    `);
+    
+    if (!check.recordset[0].ID) {
+      return `❌ Table '${tableName}' does not exist in database.`;
     }
 
-    // 2. Check for NSQL (If it's a query)
-    try {
-      const nsqlRes = await db.request().query(`
-        SELECT nsql_text 
-        FROM CMN_NSQL_QUERIES WITH(NOLOCK)
-        WHERE UPPER(code) = '${search}'
-      `);
-      if (nsqlRes.recordset.length > 0) {
-        report += `\n📜 **NSQL Definition Found!**\n`;
-        report += `Query is stored in CMN_NSQL_QUERIES table.\n`;
-      }
-    } catch (e) {
-      // Skip if table doesn't exist
-    }
+    // 2. Get ALL columns
+    const cols = await db.request().query(`
+      SELECT 
+        COLUMN_NAME, 
+        DATA_TYPE, 
+        CHARACTER_MAXIMUM_LENGTH,
+        IS_NULLABLE
+      FROM INFORMATION_SCHEMA.COLUMNS WITH(NOLOCK)
+      WHERE TABLE_NAME = '${tableName}'
+      ORDER BY ORDINAL_POSITION
+    `);
+    
+    // 3. Categorize columns
+    const allCols = cols.recordset.map((c: any) => c.COLUMN_NAME);
+    
+    const keyCols = allCols.filter((c: string) => 
+      c.includes('ID') || c.includes('NAME') || c.includes('CODE')
+    );
+    
+    const statusCols = allCols.filter((c: string) => 
+      c.includes('STATUS') || c.includes('ACTIVE') || c.includes('STATE')
+    );
+    
+    const dateCols = allCols.filter((c: string) => 
+      c.includes('DATE') || c.includes('TIME')
+    );
 
-    // 3. Check for Lookup Values
-    try {
-      const lookupRes = await db.request().query(`
-        SELECT COUNT(*) as C 
-        FROM CMN_LOOKUPS_V WITH(NOLOCK)
-        WHERE UPPER(LOOKUP_TYPE) = '${search}' 
-        AND LANGUAGE_CODE = 'en'
-      `);
-      if (lookupRes.recordset[0].C > 0) {
-        report += `\n🔎 **Lookup Values:** Found ${lookupRes.recordset[0].C} active values.\n`;
-        report += `Query table: CMN_LOOKUPS_V\n`;
-      }
-    } catch (e) {
-      // Skip if table doesn't exist
-    }
+    return `✅ **Table: ${tableName}**
 
-    // 4. Schema Fuzzy Match (Find key columns)
-    if (obj && obj.table && !obj.table.includes('CMN_')) {
-      try {
-        const keyCols = await db.request().query(`
-          SELECT COLUMN_NAME 
-          FROM INFORMATION_SCHEMA.COLUMNS WITH(NOLOCK)
-          WHERE TABLE_NAME = '${obj.table}' 
-          AND (
-            COLUMN_NAME LIKE '%ID%' 
-            OR COLUMN_NAME LIKE '%NAME%' 
-            OR COLUMN_NAME LIKE '%CODE%' 
-            OR COLUMN_NAME LIKE '%STATUS%'
-          )
-          ORDER BY ORDINAL_POSITION
-        `);
-        const cols = keyCols.recordset.map((r:any) => r.COLUMN_NAME).slice(0, 10).join(', ');
-        if (cols) {
-          report += `\n🔑 **Key Columns:** ${cols}\n`;
-        }
-      } catch (e) {
-        // Skip if error
-      }
-    }
+**Total Columns:** ${allCols.length}
 
-    return report;
+**Key Columns:**
+${keyCols.length > 0 ? keyCols.join(', ') : 'None found'}
+
+**Status Columns:**
+${statusCols.length > 0 ? statusCols.join(', ') : 'None found'}
+
+**Date Columns:**
+${dateCols.length > 0 ? dateCols.slice(0, 5).join(', ') : 'None found'}
+
+**All Columns (first 50):**
+${allCols.slice(0, 50).join(', ')}`;
 
   } catch (e: any) { 
-    return `❌ Investigation failed: ${e.message}`; 
+    return `❌ Error investigating table: ${e.message}`; 
   }
 }
 
 // ============================================================================
-// TOOL 2: SMART COLUMN SEARCH
+// TOOL 2: COLUMN SEARCH (Find specific columns)
 // ============================================================================
-async function searchColumns(tableName: string, keyword: string): Promise<string> {
+async function findColumn(tableName: string, keyword: string): Promise<string> {
   try {
     const db = await getPool();
+    
     const query = `
-      SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+      SELECT COLUMN_NAME, DATA_TYPE
       FROM INFORMATION_SCHEMA.COLUMNS WITH(NOLOCK)
       WHERE TABLE_NAME = '${tableName}' 
-      AND COLUMN_NAME LIKE '%${keyword}%'
-      ORDER BY ORDINAL_POSITION
+      AND COLUMN_NAME LIKE '%${keyword.toUpperCase()}%'
+      ORDER BY COLUMN_NAME
     `;
+    
     const res = await db.request().query(query);
     
     if (res.recordset.length === 0) {
-      return `No columns found in '${tableName}' matching '${keyword}'.`;
+      return `No columns found in '${tableName}' matching '${keyword}'.
+
+**Suggestion:** Try broader keywords like:
+- For active records: STATUS, STATE, OPEN
+- For names: NAME, TITLE, DESCRIPTION
+- For codes: CODE, KEY, ID`;
     }
     
-    return JSON.stringify(res.recordset, null, 2);
+    const found = res.recordset.map((r: any) => 
+      `${r.COLUMN_NAME} (${r.DATA_TYPE})`
+    ).join(', ');
+    
+    return `Found ${res.recordset.length} column(s): ${found}`;
+    
   } catch (e: any) { 
-    return `Error: ${e.message}`; 
+    return `❌ Error searching columns: ${e.message}`; 
   }
 }
 
 // ============================================================================
-// TOOL 3: SQL EXECUTION
+// TOOL 3: OBJECT LOOKUP (Get table for object code)
+// ============================================================================
+async function lookupObject(objectCode: string): Promise<string> {
+  const code = objectCode.toUpperCase();
+  const obj = clarityObjects.get(code);
+  
+  if (!obj) {
+    return `❌ Object '${objectCode}' not found.
+
+**Available objects:** ${Array.from(clarityObjects.keys()).slice(0, 20).join(', ')}...`;
+  }
+  
+  return `✅ **Object: ${obj.code}**
+**Name:** ${obj.name}
+**Table:** ${obj.table}
+
+**Next:** Use investigate_table('${obj.table}') to see columns.`;
+}
+
+// ============================================================================
+// TOOL 4: SQL EXECUTION
 // ============================================================================
 async function executeServerSQL(sqlQuery: string): Promise<string> {
   const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE'];
   const upperSQL = sqlQuery.toUpperCase();
   
-  if (forbidden.some(w => upperSQL.includes(` ${w} `))) {
+  if (forbidden.some(w => upperSQL.includes(` ${w} `) || upperSQL.includes(`\n${w} `))) {
     return '❌ Security: Read-only mode. Use browser actions for writes.';
   }
   
   try {
     const db = await getPool();
     console.log(`[SQL] ${sqlQuery}`);
+    
     const result = await db.request().query(sqlQuery);
     
     if (result.recordset.length === 0) {
-      return 'Query executed. No results found.';
+      return 'Query executed successfully. No results found.';
     }
     
     return JSON.stringify(result.recordset.slice(0, 100), null, 2);
+    
   } catch (e: any) { 
-    return `❌ SQL Error: ${e.message}`; 
+    return `❌ SQL Error: ${e.message}
+
+**Tip:** Check:
+- Table name spelling
+- Column name spelling  
+- Use WITH(NOLOCK) for reads
+- Use TOP instead of LIMIT`; 
   }
 }
 
 // ============================================================================
-// TOOL 4: BROWSER COMMAND (Remote Control!)
+// TOOL 5: BROWSER COMMAND (Remote Control)
 // ============================================================================
 async function triggerBrowserAction(
   method: string, 
@@ -322,95 +302,112 @@ async function triggerBrowserAction(
     }
   });
   
-  return `✅ Command sent to browser: ${method} ${browserUrl}\n\nCheck browser console (F12) for execution result.`;
+  return `✅ **Command sent to browser**
+
+**Action:** ${method} ${browserUrl}
+
+**Check browser console (F12) for execution result!**`;
 }
 
 // ============================================================================
-// AI AGENT LOOP (Sherlock Brain!)
+// AI AGENT LOOP (Multi-turn Reasoning)
 // ============================================================================
 async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => void) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
   if (clarityObjects.size === 0) await loadClarityObjects();
 
-  const systemPrompt = `You are **Clarity Sherlock** - A database detective with deep investigation skills.
+  const systemPrompt = `You are **Clarity Sherlock** - A database detective.
 
-🕵️ **INVESTIGATION METHODOLOGY:**
-1. NEVER guess table names or columns
-2. ALWAYS investigate first using available tools
-3. VERIFY findings before executing queries
-4. EXPLAIN your reasoning
+🔍 **YOUR INVESTIGATION METHOD:**
 
-🔍 **YOUR TOOLS:**
+1. **TRANSLATE**: Object code → Table name
+   - Use lookup_object('PROJECT') → INV_INVESTMENTS
+   
+2. **VERIFY**: Check table structure
+   - Use investigate_table('INV_INVESTMENTS') → See all columns
+   
+3. **SEARCH**: Find specific columns
+   - Use find_column('PRTASK', 'STATUS') → PRSTATUS
+   
+4. **EXECUTE**: Run perfect SQL
+   - execute_server_sql("SELECT...") → Results
 
-1. **investigate_object(identifier)**: Find where data lives
-   - Example: investigate_object('TASK') → Returns table: PRTASK
-   - Use this FIRST for any object-related query
-
-2. **search_columns(tableName, keyword)**: Find real column names
-   - Example: search_columns('PRTASK', 'ACTIVE') → Finds actual column
-   - Use when you need to find status, active, or any field
-
-3. **execute_server_sql(query)**: Run SELECT queries
-   - Use AFTER investigation
-   - Always use WITH(NOLOCK) and TOP
-
-4. **trigger_browser_action(method, endpoint, body)**: Create/Update via browser
-   - Only for write operations
-   - Browser has user's session
+🧠 **CORE TABLE MAP:**
+- PROJECT/IDEA → INV_INVESTMENTS
+- TASK → PRTASK
+- RESOURCE → SRM_RESOURCES
+- ASSIGNMENT → PRASSIGNMENT
+- Custom Objects → ODF_CA_{CODE}
 
 💡 **INVESTIGATION PATTERN:**
 
 User: "How many active tasks?"
 
-Step 1: investigate_object('TASK')
-→ Found: Table is PRTASK
+Step 1: lookup_object('TASK')
+→ Table: PRTASK
 
-Step 2: search_columns('PRTASK', 'STATUS')  
-→ Found: PRSTATUS column (not IS_ACTIVE!)
+Step 2: find_column('PRTASK', 'ACTIVE')
+→ No results
 
-Step 3: execute_server_sql
+Step 3: find_column('PRTASK', 'STATUS')
+→ Found: PRSTATUS
+
+Step 4: execute_server_sql
 → SELECT COUNT(*) FROM PRTASK WITH(NOLOCK) WHERE PRSTATUS != 2
 
-🎯 **KEY FACTS:**
-- Tasks: Table = PRTASK, Active = PRSTATUS != 2
-- Projects: Table = INV_INVESTMENTS, Active = IS_ACTIVE = 1
-- Resources: Table = SRM_RESOURCES
-
-⚠️ **RULES:**
-- Always use WITH(NOLOCK) in queries
+⚠️ **CRITICAL RULES:**
+- ALWAYS use WITH(NOLOCK) in SELECT
 - Use TOP not LIMIT
 - Find numeric IDs before REST calls
-- Explain your investigation steps`;
+- Explain your investigation steps
+- If column not found, try broader keywords`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
-        name: 'investigate_object',
-        description: 'Find metadata about any Clarity object (table name, type, columns). Use this FIRST!',
+        name: 'lookup_object',
+        description: 'Get table name for an object code (PROJECT, TASK, etc.)',
         parameters: { 
           type: 'object', 
           properties: { 
-            identifier: { 
+            objectCode: { 
               type: 'string',
               description: 'Object code like PROJECT, TASK, RESOURCE'
             } 
           }, 
-          required: ['identifier'] 
+          required: ['objectCode'] 
         }
       }
     },
     {
       type: 'function',
       function: {
-        name: 'search_columns',
-        description: 'Search for column names in a table. Use to find STATUS, ACTIVE, NAME columns.',
+        name: 'investigate_table',
+        description: 'Get all columns and structure of a table',
         parameters: { 
           type: 'object', 
           properties: { 
             tableName: { 
               type: 'string',
-              description: 'Database table name like PRTASK, INV_INVESTMENTS'
+              description: 'Table name like INV_INVESTMENTS, PRTASK'
+            } 
+          }, 
+          required: ['tableName'] 
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'find_column',
+        description: 'Search for column name by keyword in a specific table',
+        parameters: { 
+          type: 'object', 
+          properties: { 
+            tableName: { 
+              type: 'string',
+              description: 'Table name to search'
             }, 
             keyword: { 
               type: 'string',
@@ -425,7 +422,7 @@ Step 3: execute_server_sql
       type: 'function',
       function: {
         name: 'execute_server_sql',
-        description: 'Execute SELECT query. Use AFTER investigation.',
+        description: 'Execute SELECT query on database',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -442,13 +439,13 @@ Step 3: execute_server_sql
       type: 'function',
       function: {
         name: 'trigger_browser_action',
-        description: 'Send command to browser for CREATE/UPDATE operations.',
+        description: 'Send command to browser for CREATE/UPDATE operations',
         parameters: {
           type: 'object', 
           properties: { 
             method: {
               type: 'string',
-              enum: ['GET', 'POST', 'PUT', 'DELETE']
+              enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']
             }, 
             endpoint: {
               type: 'string',
@@ -470,7 +467,7 @@ Step 3: execute_server_sql
     { role: 'user', content: userMessage }
   ];
 
-  // Multi-step reasoning loop
+  // Multi-turn reasoning loop (up to 10 iterations)
   let iteration = 0;
   while (iteration < 10) {
     iteration++;
@@ -495,21 +492,26 @@ Step 3: execute_server_sql
 
     if (!msg) throw new Error('Invalid AI response');
 
+    // Tool calls - continue investigation
     if (msg.tool_calls?.length > 0) {
       messages.push(msg);
       
       for (const call of msg.tool_calls) {
         const fn = call.function.name;
         const args = JSON.parse(call.function.arguments);
+        
         sendUpdate({ type: 'tool', data: `🔍 ${fn}` });
         
         let res = '';
         try {
-          if (fn === 'investigate_object') {
-            res = await investigateObject(args.identifier);
+          if (fn === 'lookup_object') {
+            res = await lookupObject(args.objectCode);
           }
-          else if (fn === 'search_columns') {
-            res = await searchColumns(args.tableName, args.keyword);
+          else if (fn === 'investigate_table') {
+            res = await investigateTable(args.tableName);
+          }
+          else if (fn === 'find_column') {
+            res = await findColumn(args.tableName, args.keyword);
           }
           else if (fn === 'execute_server_sql') {
             res = await executeServerSQL(args.sqlQuery);
@@ -521,10 +523,10 @@ Step 3: execute_server_sql
             res = `Unknown tool: ${fn}`;
           }
           
-          sendUpdate({ type: 'step', data: '✅ Done' });
+          sendUpdate({ type: 'step', data: '✅' });
         } catch (e: any) {
           res = `Error: ${e.message}`;
-          sendUpdate({ type: 'step', data: '❌ Error' });
+          sendUpdate({ type: 'step', data: '❌' });
         }
         
         messages.push({ 
@@ -534,9 +536,11 @@ Step 3: execute_server_sql
         });
       }
       
+      // Continue loop for next iteration
       continue;
     }
 
+    // Final answer
     if (msg.content) {
       sendUpdate({ type: 'complete', data: msg.content });
       return msg.content;
@@ -545,7 +549,7 @@ Step 3: execute_server_sql
     break;
   }
   
-  return 'Investigation complete';
+  return 'Investigation complete (max iterations reached)';
 }
 
 // ============================================================================
@@ -553,7 +557,7 @@ Step 3: execute_server_sql
 // ============================================================================
 const app = express();
 
-// CORS must be first!
+// CORS first!
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -562,22 +566,25 @@ app.use(cors({
 
 app.use(express.json());
 
+// Health check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v13.0-sherlock',
+    version: 'v15.0-universal-truth',
     database: pool?.connected ? 'connected' : 'disconnected',
     objects: clarityObjects.size,
+    coreObjects: Object.keys(CORE_MAPPING).length,
     features: [
-      'sherlock-investigation',
-      'deep-discovery',
-      'smart-column-search',
-      'remote-control',
-      'hybrid-intelligence'
+      'hardcoded-mapping',
+      'schema-investigation',
+      'column-search',
+      'multi-turn-reasoning',
+      'remote-control'
     ]
   });
 });
 
+// Chat endpoint
 app.post('/api/chat', async (req, res) => {
   console.log('[Chat] Request received');
   
@@ -603,11 +610,12 @@ const PORT = 3001;
 app.listen(PORT, async () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 Clarity MCP v13.0 SHERLOCK ARCHITECT`);
+  console.log(`🚀 Clarity MCP v15.0 UNIVERSAL TRUTH`);
   console.log(`📡 Server: http://localhost:${PORT}`);
   console.log(`🏥 Health: http://localhost:${PORT}/health`);
-  console.log(`🕵️ Mode: Deep Discovery + Investigation`);
-  console.log(`🎮 Control: Remote Browser Execution`);
+  console.log(`🕵️ Investigation: Schema-based discovery`);
+  console.log(`🗺️ Mapping: Hardcoded core + ODF_CA_ pattern`);
+  console.log(`🎮 Control: Remote browser execution`);
   console.log('==========================================================');
   console.log('');
   
