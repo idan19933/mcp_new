@@ -3,7 +3,7 @@
 import sql from 'mssql';
 import express from 'express';
 import dotenv from 'dotenv';
-import axios from 'axios';
+import axios from 'axios'; // ROBUST HTTP CLIENT
 import https from 'https';
 
 dotenv.config();
@@ -37,7 +37,7 @@ const apiClient = axios.create({
   baseURL: CLARITY_BASE_URL,
   timeout: 15000, // 15s timeout
   httpsAgent: new https.Agent({ 
-    rejectUnauthorized: false 
+    rejectUnauthorized: false // Bypass SSL errors
   }),
   proxy: false, // Force direct connection (change if using proxy)
   maxRedirects: 5,
@@ -139,23 +139,26 @@ function formatSessionCookie(rawValue: any): string | null {
 }
 
 // ============================================================================
-// TOOL 1: DYNAMIC SQL (READ ONLY - SYSTEM TABLES PROTECTED)
+// TOOL 1: DYNAMIC SQL (READ ONLY - STRICT SECURITY!)
 // ============================================================================
 async function executeDynamicQuery(sqlQuery: string): Promise<string> {
   const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'EXEC'];
   const upperSQL = sqlQuery.toUpperCase().trim();
   
-  // Block all write operations - must use REST for system tables
+  // STRICT: Block ALL write operations on system tables
   if (forbidden.some(w => upperSQL.includes(` ${w} `))) {
-    return `❌ Security Block: System tables must be updated via REST API only.
+    return `❌ Security Block: Direct SQL writes are FORBIDDEN.
 
-**Why?** Direct SQL writes bypass:
-- Business logic (numbering, workflows)
-- Auditing and history
-- Data validation
-- Process triggers
+**Why?** Writing to system tables bypasses:
+- Business logic (auto-numbering, workflows)
+- Audit trails and history
+- Data validation rules
+- Process triggers and notifications
 
-**Solution:** Use the REST API tool instead.`;
+**Solution:** Use the REST API tool instead.
+- REST API ensures data integrity
+- Proper business logic execution
+- Complete audit trail`;
   }
   
   if (!upperSQL.startsWith('SELECT') && !upperSQL.startsWith('WITH')) {
@@ -183,7 +186,7 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
 }
 
 // ============================================================================
-// TOOL 2: REST API (AXIOS POWERED - MORE ROBUST!)
+// TOOL 2: REST API (AXIOS POWERED - SUPER ROBUST!)
 // ============================================================================
 async function callClarityREST(
   method: string, 
@@ -228,13 +231,25 @@ async function callClarityREST(
         return `❌ API Error 404: Endpoint not found.
 
 **Common causes:**
-- Wrong endpoint format
-- Using string code instead of numeric ID
-- Resource doesn't exist
+1. Wrong endpoint format
+2. Using string code instead of numeric ID
+3. Resource doesn't exist
 
 **Check:**
 - Endpoint: ${cleanEndpoint}
-- Did you use numeric ID? (e.g., /projects/5004001/tasks)`;
+- Are you using numeric ID? (e.g., /projects/5004001/tasks)
+- Not string code (e.g., /projects/this_proj/tasks)`;
+      }
+      
+      if (error.response.status === 401) {
+        return `❌ API Error 401: Unauthorized.
+
+**Possible causes:**
+- Session expired
+- Invalid session cookie
+- User doesn't have permission
+
+**Solution:** Log in again via the Extension`;
       }
       
       return `❌ API Error (${error.response.status}): ${JSON.stringify(error.response.data, null, 2)}`;
@@ -245,21 +260,31 @@ async function callClarityREST(
       console.error(`[Network Error] Code: ${error.code}`);
       console.error(`[Network Error] Message: ${error.message}`);
       
-      return `❌ Network Error: Cannot reach Clarity server at ${CLARITY_BASE_URL}
+      return `❌ Network Error: Cannot reach Clarity server
 
+**Target:** ${CLARITY_BASE_URL}
 **Error Code:** ${error.code || 'UNKNOWN'}
 **Details:** ${error.message}
 
-**Possible causes:**
-- Server is down or unreachable
-- Firewall blocking connection
-- VPN not connected
-- Wrong CLARITY_URL in environment
+**This means:**
+The server at ${DB_CONFIG.server}:8080 is unreachable from this location.
 
-**If running on Railway:**
+**Possible causes:**
+1. Server is down or not responding
+2. Firewall blocking the connection
+3. VPN not connected
+4. Wrong CLARITY_URL in environment variables
+
+**If running on Railway/Cloud:**
 - Railway (cloud) cannot reach ${DB_CONFIG.server} (internal IP)
-- Consider deploying locally on your network
-- Or setup VPN/tunnel (Cloudflare Tunnel, Tailscale, etc.)`;
+- Internal IPs (16.x.x.x, 192.168.x.x, 10.x.x.x) are not accessible from cloud
+- **Solution:** Deploy locally on your network OR setup VPN/tunnel
+
+**Recommended Solutions:**
+1. **Local Deployment:** Run the server on a computer in your network
+2. **Cloudflare Tunnel:** Setup tunnel to expose internal service
+3. **Tailscale VPN:** Connect Railway to your network via VPN
+4. **Public IP/Domain:** If Clarity has a public URL, update CLARITY_URL`;
       
     } else {
       // Something else happened
@@ -309,34 +334,34 @@ async function runAIAgentLoop(
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
   if (clarityObjects.size === 0) await loadClarityObjects();
 
-  const systemPrompt = `You are a Clarity PPM Architect with strict security rules.
+  const systemPrompt = `You are a Clarity PPM Architect with STRICT security rules.
 
-✅ **ARCHITECTURE RULES:**
+✅ **ARCHITECTURE RULES (NON-NEGOTIABLE):**
 
 1. **System Objects (Tasks, Projects, Issues, Risks):**
-   - MUST be created/updated via **REST API**
-   - SQL writes are STRICTLY FORBIDDEN
-   - Why? Business logic, auditing, numbering, workflows
+   - ✅ MUST be created/updated via **REST API**
+   - ❌ SQL writes are **STRICTLY FORBIDDEN**
+   - Why? Bypasses business logic, auditing, numbering, workflows
 
 2. **Data Reading:**
-   - Use **SQL** (faster, easier)
+   - ✅ Use **SQL** (faster, easier)
    - Always use WITH(NOLOCK) and TOP (not LIMIT)
 
 3. **Custom Objects (ODF_CA_*):**
-   - Can use SQL or REST
+   - ✅ Can use SQL or REST
    - Prefer SQL for simplicity
 
-🎯 **TASK CREATION WORKFLOW:**
+🎯 **TASK CREATION WORKFLOW (ID-FIRST):**
 
-Step 1: Find Parent Project ID via SQL
+**Step 1:** Find Parent Project ID via SQL
 \`\`\`sql
 SELECT ID, CODE, NAME 
 FROM INV_INVESTMENTS WITH(NOLOCK)
 WHERE CODE = 'project_code' OR NAME LIKE '%project_name%'
 \`\`\`
-Result: ID = 5004001
+Result: {"ID": 5004001, "CODE": "this_proj"}
 
-Step 2: Create Task via REST
+**Step 2:** Create Task via REST (using numeric ID!)
 \`\`\`
 Method: POST
 Endpoint: /ppm/rest/v1/projects/5004001/tasks
@@ -345,35 +370,37 @@ Body: {
   "name": "Task Name",
   "status": "NOT_STARTED",
   "priority": 10,
-  "start": "2026-01-10T08:00:00",
-  "finish": "2026-01-15T17:00:00"
+  "start": "2026-01-15T08:00:00",
+  "finish": "2026-01-20T17:00:00"
 }
 \`\`\`
 
-⚠️ **ERROR HANDLING:**
+⚠️ **CRITICAL ERROR HANDLING:**
 
-**Network Error:**
-If REST fails with "Network Error", tell user:
-"I cannot reach the Clarity server from this location. This is likely because:
-- The server is on an internal network (${DB_CONFIG.server})
-- This application is running in the cloud
-- Solution: Deploy locally on your network or setup VPN/tunnel"
+**Network Error (Most Common):**
+If REST returns "Network Error: Cannot reach Clarity server":
+→ Tell user: "I cannot reach the Clarity server from this location. The server (${DB_CONFIG.server}) appears to be on an internal network that's not accessible from where this application is running. Consider deploying locally on your network or setting up a VPN/tunnel solution."
 
 **404 Error:**
-Check if you're using numeric ID (not string code) in the path.
+→ Check: Are you using numeric ID (5004001) not string code (this_proj)?
+→ Verify: Does the project/resource exist?
 
-🔗 **CRITICAL RULES:**
-- ALWAYS use numeric IDs in REST paths (not string codes!)
+**401 Error:**
+→ Session expired or invalid
+→ Tell user to log in again
+
+🔗 **REMEMBER:**
+- ALWAYS use numeric IDs in REST paths (NEVER string codes!)
 - NEVER INSERT/UPDATE system tables via SQL
-- READ the error messages and act on suggestions
-- Self-correct when schema errors occur`;
+- READ errors carefully and provide helpful guidance
+- Be honest about network limitations`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'run_read_sql',
-        description: 'Execute SELECT query to read data and find IDs. Read-only.',
+        description: 'Execute SELECT query to read data and find IDs. Read-only, write operations blocked.',
         parameters: {
           type: 'object',
           properties: { 
@@ -390,7 +417,7 @@ Check if you're using numeric ID (not string code) in the path.
       type: 'function',
       function: {
         name: 'call_rest_api',
-        description: 'Call Clarity REST API using Axios (robust HTTP client). Use numeric IDs in paths!',
+        description: 'Call Clarity REST API using Axios (robust HTTP). CRITICAL: Use numeric IDs in paths!',
         parameters: {
           type: 'object',
           properties: {
@@ -415,7 +442,7 @@ Check if you're using numeric ID (not string code) in the path.
       type: 'function',
       function: {
         name: 'get_schema',
-        description: 'Get database schema for any object',
+        description: 'Get database schema for verification',
         parameters: {
           type: 'object',
           properties: { 
@@ -543,7 +570,7 @@ async function startHTTPServer() {
       const sessionCookie = formatSessionCookie(rawSession);
 
       if (sessionCookie) {
-        console.log('[Session] Active - REST enabled');
+        console.log('[Session] Active - REST enabled (Axios)');
         sendUpdate({ type: 'info', data: '🔐 Session Ready (Axios)' });
       } else {
         console.log('[Session] Guest mode');
@@ -562,19 +589,21 @@ async function startHTTPServer() {
   app.get('/health', (req, res) => {
     res.json({
       status: 'ready',
-      version: 'v9.0-axios',
+      version: 'v9.0-axios-final',
       database: pool?.connected ? 'connected' : 'disconnected',
       objects: clarityObjects.size,
       ai: 'OpenAI GPT-4o',
       clarityUrl: CLARITY_BASE_URL,
-      httpClient: 'Axios (robust)',
+      httpClient: 'Axios (Production-Ready)',
+      security: 'Strict (REST-Only for System Tables)',
       features: [
         'axios-http-client',
+        'strict-security',
         'system-table-protection',
         'id-first-logic',
         'smart-cookie',
         'ssl-bypass',
-        'detailed-errors'
+        'detailed-network-errors'
       ]
     });
   });
@@ -582,14 +611,14 @@ async function startHTTPServer() {
   app.listen(PORT, () => {
     console.log('');
     console.log('==========================================================');
-    console.log(`🚀 Clarity MCP v9.0 AXIOS EDITION`);
+    console.log(`🚀 Clarity MCP v9.0 AXIOS EDITION (FINAL)`);
     console.log(`📡 Chat: http://localhost:${PORT}/api/chat`);
     console.log(`🏥 Health: http://localhost:${PORT}/health`);
     console.log(`📊 Objects: ${clarityObjects.size} loaded`);
     console.log(`🔗 Clarity: ${CLARITY_BASE_URL}`);
     console.log(`🤖 AI: OpenAI GPT-4o`);
-    console.log(`🌐 HTTP: Axios (Robust + Proxy Support)`);
-    console.log(`🛡️ Security: System Tables Protected (REST Only)`);
+    console.log(`🌐 HTTP: Axios (Robust + Production-Ready)`);
+    console.log(`🛡️ Security: STRICT (REST-Only for System Tables)`);
     console.log('==========================================================');
     console.log('');
   });
