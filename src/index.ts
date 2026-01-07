@@ -8,7 +8,7 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v17.0 - DEEP DIVER (Lookups & NSQL)");
+console.log("🚀 CLARITY MCP v17.2 - SCHEMA MASTER (Smart Lookups)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -70,7 +70,6 @@ const CORE_MAPPING: Record<string, string> = {
 async function loadClarityObjects() {
   console.log('[Objects] Loading core map...');
   
-  // Always load core map first
   Object.entries(CORE_MAPPING).forEach(([code, table]) => {
     clarityObjects.set(code, { code, name: code, table });
   });
@@ -106,9 +105,9 @@ async function loadClarityObjects() {
 // ============================================================================
 async function executeServerSQL(sqlQuery: string): Promise<string> {
   if (!dbConnected) {
-    await getPool(); // Retry connection
+    await getPool();
     if (!dbConnected) {
-      return '⚠️ Database is currently unreachable. I cannot run SQL analysis.';
+      return '⚠️ DB Offline. Cannot verify data.';
     }
   }
   
@@ -137,9 +136,7 @@ async function executeServerSQL(sqlQuery: string): Promise<string> {
 }
 
 async function investigateTable(tableName: string): Promise<string> {
-  if (!dbConnected) {
-    return `⚠️ DB Offline. Assuming table '${tableName}' exists.`;
-  }
+  if (!dbConnected) return `⚠️ DB Offline.`;
   
   try {
     const db = await getPool();
@@ -171,12 +168,7 @@ async function lookupObject(objectCode: string): Promise<string> {
   const obj = clarityObjects.get(code);
   
   if (!obj) {
-    return `❌ Object '${objectCode}' not found in ODF_OBJECTS.
-
-💡 **SMART TIP:** 
-- If you are looking for a LOOKUP, check table 'CMN_LOOKUP_TYPES'.
-- If you are looking for NSQL, check table 'CMN_NSQL_QUERIES'.
-- Try using 'execute_server_sql' to search those tables directly.`;
+    return `❌ Object '${objectCode}' not found. Try searching via SQL.`;
   }
   
   return `✅ Object: ${obj.code}
@@ -191,6 +183,17 @@ async function triggerBrowserAction(
 ): Promise<string> {
   const browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
   
+  // Auto-add required fields for task creation
+  if (endpoint.includes('tasks') && method === 'POST') {
+    if (!body.start) body.start = new Date().toISOString();
+    if (!body.finish) {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      body.finish = tomorrow.toISOString();
+    }
+    if (!body.status) body.status = 'NOT_STARTED';
+  }
+  
   console.log(`[Browser-CMD] ${method} ${browserUrl}`);
   
   sendUpdate({
@@ -203,11 +206,13 @@ async function triggerBrowserAction(
     }
   });
   
-  return `✅ Command sent to browser: ${method} ${browserUrl}`;
+  return `🚀 Command sent to browser: ${method} ${browserUrl}
+
+⚠️ **WAIT & VERIFY:** Check database for result.`;
 }
 
 // ============================================================================
-// AI AGENT LOOP (The New "Deep Diver" Brain)
+// AI AGENT LOOP (Schema Master)
 // ============================================================================
 async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => void) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
@@ -219,71 +224,64 @@ async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => vo
 
   const dbStatus = dbConnected ? '✅ DB ONLINE' : '⚠️ DB OFFLINE';
 
-  const systemPrompt = `You are **Clarity Master** - A persistent investigator who NEVER gives up after one tool.
+  const systemPrompt = `You are **Clarity Master** - A database expert who understands schema relationships.
 
 STATUS: ${dbStatus}
 
-🧠 **KNOWLEDGE BASE (Where to find things):**
+🧠 **CLARITY SCHEMA MAP (Critical Knowledge):**
 
-1. **Standard Objects** (Project, Task, etc.):
-   - Use \`lookup_object('PROJECT')\` to find the table.
-   - Table is usually \`INV_INVESTMENTS\` or \`PRTASK\`.
+1. **LOOKUPS (Dynamic) - The JOIN Path:**
+   - Definition Table: \`CMN_LOOKUP_TYPES\`
+   - Query Table: \`CMN_NSQL_QUERIES\`
+   - **JOIN Column:** \`DYNAMIC_QUERY_ID\` = \`ID\`
+   
+   **Query to find NSQL for a Lookup:**
+   \`\`\`sql
+   SELECT l.LOOKUP_TYPE, l.LOOKUP_NAME, q.NSQL_TEXT, q.CODE
+   FROM CMN_LOOKUP_TYPES l WITH(NOLOCK)
+   JOIN CMN_NSQL_QUERIES q WITH(NOLOCK) ON l.DYNAMIC_QUERY_ID = q.ID
+   WHERE l.LOOKUP_TYPE = 'YOUR_LOOKUP_ID_HERE'
+   \`\`\`
 
-2. **Lookups & Lists**:
-   - These are NOT objects. Do not use \`lookup_object\`.
-   - **SEARCH THEM** using SQL:
-     \`SELECT * FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%Charge%'\`
-   - Values are in \`CMN_LOOKUPS_V\`.
+2. **LOOKUPS (Static) - Direct Values:**
+   - Stored in: \`CMN_LOOKUPS_V\`
+   - Query:
+   \`\`\`sql
+   SELECT LOOKUP_CODE, DESCRIPTION 
+   FROM CMN_LOOKUPS_V WITH(NOLOCK)
+   WHERE LOOKUP_TYPE = 'YOUR_LOOKUP_ID'
+   AND LANGUAGE_CODE = 'en'
+   \`\`\`
 
-3. **NSQL Queries**:
-   - Stored in table: \`CMN_NSQL_QUERIES\`.
-   - Search them:
-     \`SELECT code, nsql_text FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE code LIKE '%Charge%'\`
+3. **STANDARD OBJECTS:**
+   - Projects: \`INV_INVESTMENTS\`
+   - Tasks: \`PRTASK\`
+   - Resources: \`SRM_RESOURCES\`
+   - Custom: \`ODF_CA_{CODE}\`
 
-4. **Process/Workflows**:
-   - Stored in \`BPM_DEF_PROCESS_VERSIONS\` or \`BPM_RUN_PROCESSES\`.
+🚀 **CRITICAL STRATEGY:**
 
-🚀 **CRITICAL STRATEGY - YOU MUST FOLLOW THIS:**
+When user asks: "Find NSQL for Lookup X"
+❌ WRONG: Search CMN_NSQL_QUERIES directly
+✅ RIGHT: Use the JOIN query from #1 above
 
-Step 1: Try the most obvious tool first
-Step 2: If that fails, IMMEDIATELY try alternative approach
-Step 3: Keep trying until you find the answer
-Step 4: ONLY give final answer after you've found real data
-
-**EXAMPLE - Finding Lookups:**
-User: "Find Active Charge Code lookup"
-
-YOUR THINKING:
-Iteration 1: Try lookup_object('Active Charge Code')
-→ Result: Not found (because it's a lookup, not an object)
-→ DECISION: Switch strategy!
-
-Iteration 2: Search CMN_LOOKUP_TYPES
-→ execute_server_sql("SELECT * FROM CMN_LOOKUP_TYPES WHERE LOOKUP_TYPE LIKE '%Charge%'")
-→ Result: Found LOOKUP_TYPE = 'CHG_CODE'
-→ DECISION: Now get the values!
-
-Iteration 3: Get lookup values
-→ execute_server_sql("SELECT * FROM CMN_LOOKUPS_V WHERE LOOKUP_TYPE = 'CHG_CODE'")
-→ Result: Got 50 charge codes
-→ DECISION: Now I have complete answer!
-
-Iteration 4: Give final answer with data
+When user asks: "Find Lookup values"
+Step 1: Search CMN_LOOKUP_TYPES to find the LOOKUP_TYPE
+Step 2: Query CMN_LOOKUPS_V with that LOOKUP_TYPE
 
 ⚠️ **ABSOLUTE RULES:**
-- NEVER give final answer after just ONE tool call
-- If lookup_object fails, ALWAYS try execute_server_sql
-- Always use \`WITH(NOLOCK)\`
-- Always use \`TOP 100\` or similar limit
-- Keep going until you have REAL DATA to show the user`;
-
+- ALWAYS use \`WITH(NOLOCK)\`
+- ALWAYS use \`TOP 100\` to limit results
+- If lookup_object fails, switch to SQL immediately
+- For task creation, verify afterwards with SQL
+- Never give up after one failed tool`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'execute_server_sql',
-        description: 'Run ANY SQL query. Use this to search tables, lookups, and NSQL.',
+        description: 'Run SQL query. Essential for Lookups, JOINs, and Verification.',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -297,7 +295,7 @@ Iteration 4: Give final answer with data
       type: 'function',
       function: {
         name: 'lookup_object',
-        description: 'Check if something is a Standard Object (Project, Task). Fails for Lookups/NSQL.',
+        description: 'Check table names for standard objects only.',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -311,7 +309,7 @@ Iteration 4: Give final answer with data
       type: 'function',
       function: {
         name: 'investigate_table',
-        description: 'Check columns of a known table.',
+        description: 'Check columns of a specific table.',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -325,7 +323,7 @@ Iteration 4: Give final answer with data
       type: 'function',
       function: {
         name: 'trigger_browser_action',
-        description: 'Create/Update data via Browser.',
+        description: 'Send Create/Update command to browser for execution.',
         parameters: {
           type: 'object',
           properties: {
@@ -348,9 +346,11 @@ Iteration 4: Give final answer with data
   ];
 
   let iteration = 0;
-  while (iteration < 10) {
+  const MAX_ITERATIONS = 12;
+  
+  while (iteration < MAX_ITERATIONS) { 
     iteration++;
-    sendUpdate({ type: 'thinking', data: `Reasoning... (${iteration}/10)` });
+    sendUpdate({ type: 'thinking', data: `Reasoning... (${iteration}/${MAX_ITERATIONS})` });
 
     try {
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -447,7 +447,7 @@ Iteration 4: Give final answer with data
 }
 
 // ============================================================================
-// SERVER
+// SERVER SETUP
 // ============================================================================
 const app = express();
 
@@ -462,15 +462,15 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v17.0-deep-diver',
+    version: 'v17.2-schema-master',
     database: dbConnected ? 'online' : 'offline',
     mode: dbConnected ? 'smart-mode' : 'remote-control-mode',
     objects: clarityObjects.size,
     features: [
-      'deep-diving',
-      'lookup-search',
-      'nsql-search',
-      'multi-strategy',
+      'schema-joins',
+      'lookup-nsql-intelligence',
+      'auto-task-fields',
+      'multi-step-reasoning',
       'never-gives-up'
     ]
   });
@@ -504,10 +504,10 @@ app.post('/api/chat', async (req, res) => {
 app.listen(PORT, HOST, async () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v17.0 DEEP DIVER`);
+  console.log(`🚀 CLARITY MCP v17.2 SCHEMA MASTER`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`🔍 Features: Lookups, NSQL, Multi-Strategy Intelligence`);
+  console.log(`🔗 Features: JOIN Intelligence, Lookup NSQL, Auto Fields`);
   console.log('==========================================================');
   console.log('');
   
