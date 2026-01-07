@@ -3,18 +3,13 @@
 import sql from 'mssql';
 import express from 'express';
 import dotenv from 'dotenv';
-import axios from 'axios'; // ROBUST HTTP CLIENT
-import https from 'https';
 
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v9.0 - AXIOS EDITION (Robust REST)");
+console.log("🚀 CLARITY MCP v11.0 - REMOTE CONTROL EDITION");
 console.log("==========================================================");
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const DB_CONFIG = {
   user: process.env.DB_USER || 'niku',
@@ -31,18 +26,6 @@ const DB_CONFIG = {
 };
 
 const CLARITY_BASE_URL = process.env.CLARITY_URL || `http://${DB_CONFIG.server}:8080`; 
-
-// AXIOS INSTANCE (Bypasses SSL, Handles Proxies, More Robust)
-const apiClient = axios.create({
-  baseURL: CLARITY_BASE_URL,
-  timeout: 15000, // 15s timeout
-  httpsAgent: new https.Agent({ 
-    rejectUnauthorized: false // Bypass SSL errors
-  }),
-  proxy: false, // Force direct connection (change if using proxy)
-  maxRedirects: 5,
-  validateStatus: (status) => status < 600 // Don't throw on 4xx/5xx
-});
 
 // ============================================================================
 // TABLE MAP
@@ -114,51 +97,14 @@ async function loadClarityObjects() {
 }
 
 // ============================================================================
-// SMART COOKIE FORMATTER
-// ============================================================================
-function formatSessionCookie(rawValue: any): string | null {
-  if (!rawValue) return null;
-  let val = String(rawValue).trim();
-
-  console.log(`[Cookie] Raw: ${val.substring(0, 30)}...`);
-
-  if (val.includes('JSESSIONID=')) {
-    const match = val.match(/JSESSIONID=([^;]+)/);
-    if (match) val = match[1];
-  }
-  else if (val.startsWith('sessionId=')) {
-    val = val.replace('sessionId=', '');
-  }
-
-  val = val.replace(/['";]/g, '');
-
-  const formatted = `JSESSIONID=${val}`;
-  console.log(`[Cookie] Formatted: ${formatted.substring(0, 30)}...`);
-  
-  return formatted;
-}
-
-// ============================================================================
-// TOOL 1: DYNAMIC SQL (READ ONLY - STRICT SECURITY!)
+// TOOL 1: SQL READ (READ-ONLY)
 // ============================================================================
 async function executeDynamicQuery(sqlQuery: string): Promise<string> {
   const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'EXEC'];
   const upperSQL = sqlQuery.toUpperCase().trim();
   
-  // STRICT: Block ALL write operations on system tables
   if (forbidden.some(w => upperSQL.includes(` ${w} `))) {
-    return `❌ Security Block: Direct SQL writes are FORBIDDEN.
-
-**Why?** Writing to system tables bypasses:
-- Business logic (auto-numbering, workflows)
-- Audit trails and history
-- Data validation rules
-- Process triggers and notifications
-
-**Solution:** Use the REST API tool instead.
-- REST API ensures data integrity
-- Proper business logic execution
-- Complete audit trail`;
+    return '❌ Security: Read-only. Use browser command for writes.';
   }
   
   if (!upperSQL.startsWith('SELECT') && !upperSQL.startsWith('WITH')) {
@@ -186,112 +132,58 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
 }
 
 // ============================================================================
-// TOOL 2: REST API (AXIOS POWERED - SUPER ROBUST!)
+// TOOL 2: CLIENT-SIDE EXECUTION GENERATOR (GENIUS!)
 // ============================================================================
-async function callClarityREST(
+// This doesn't execute REST - it sends a command to the browser to execute it!
+async function triggerClientExecution(
   method: string, 
   endpoint: string, 
   body: any, 
-  sessionCookie: string | null
+  sendUpdate: any
 ): Promise<string> {
-  if (!sessionCookie) {
-    return '❌ Error: No Active Session. Please log in via Extension.';
-  }
-
-  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  // Clean the endpoint
+  const cleanEndpoint = endpoint.startsWith('/ppm/rest/v1') 
+    ? endpoint 
+    : `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
   
-  console.log(`[REST-AXIOS] ${method} ${CLARITY_BASE_URL}${cleanEndpoint}`);
-  if (body) console.log(`[REST-AXIOS] Body:`, JSON.stringify(body, null, 2));
+  console.log(`[BROWSER-CMD] Sending command: ${method} ${cleanEndpoint}`);
   
-  try {
-    const response = await apiClient.request({
-      method: method,
+  // 1. Send the COMMAND Signal (Extension will listen for this!)
+  const commandPayload = {
+    type: 'client_execute', // Magic keyword the extension listens for
+    data: {
       url: cleanEndpoint,
-      data: body,
-      headers: {
+      method: method,
+      body: body,
+      headers: { 
         'Content-Type': 'application/json',
-        'Cookie': sessionCookie,
         'Accept': 'application/json'
       }
-    });
-
-    console.log(`[REST-AXIOS] Success: ${response.status}`);
-    
-    // Axios automatically parses JSON
-    return JSON.stringify(response.data, null, 2);
-
-  } catch (error: any) {
-    // DETAILED AXIOS ERROR LOGGING
-    if (error.response) {
-      // Server responded with error status (4xx, 5xx)
-      console.error(`[REST Error] Status: ${error.response.status}`);
-      console.error(`[REST Error] Data:`, error.response.data);
-      
-      if (error.response.status === 404) {
-        return `❌ API Error 404: Endpoint not found.
-
-**Common causes:**
-1. Wrong endpoint format
-2. Using string code instead of numeric ID
-3. Resource doesn't exist
-
-**Check:**
-- Endpoint: ${cleanEndpoint}
-- Are you using numeric ID? (e.g., /projects/5004001/tasks)
-- Not string code (e.g., /projects/this_proj/tasks)`;
-      }
-      
-      if (error.response.status === 401) {
-        return `❌ API Error 401: Unauthorized.
-
-**Possible causes:**
-- Session expired
-- Invalid session cookie
-- User doesn't have permission
-
-**Solution:** Log in again via the Extension`;
-      }
-      
-      return `❌ API Error (${error.response.status}): ${JSON.stringify(error.response.data, null, 2)}`;
-      
-    } else if (error.request) {
-      // Request made but NO response received (Network Error)
-      console.error(`[Network Error] No response from server`);
-      console.error(`[Network Error] Code: ${error.code}`);
-      console.error(`[Network Error] Message: ${error.message}`);
-      
-      return `❌ Network Error: Cannot reach Clarity server
-
-**Target:** ${CLARITY_BASE_URL}
-**Error Code:** ${error.code || 'UNKNOWN'}
-**Details:** ${error.message}
-
-**This means:**
-The server at ${DB_CONFIG.server}:8080 is unreachable from this location.
-
-**Possible causes:**
-1. Server is down or not responding
-2. Firewall blocking the connection
-3. VPN not connected
-4. Wrong CLARITY_URL in environment variables
-
-**If running on Railway/Cloud:**
-- Railway (cloud) cannot reach ${DB_CONFIG.server} (internal IP)
-- Internal IPs (16.x.x.x, 192.168.x.x, 10.x.x.x) are not accessible from cloud
-- **Solution:** Deploy locally on your network OR setup VPN/tunnel
-
-**Recommended Solutions:**
-1. **Local Deployment:** Run the server on a computer in your network
-2. **Cloudflare Tunnel:** Setup tunnel to expose internal service
-3. **Tailscale VPN:** Connect Railway to your network via VPN
-4. **Public IP/Domain:** If Clarity has a public URL, update CLARITY_URL`;
-      
-    } else {
-      // Something else happened
-      console.error(`[Client Error] ${error.message}`);
-      return `❌ Client Error: ${error.message}`;
     }
-  }
+  };
+  
+  // Send the command via the stream
+  sendUpdate(commandPayload);
+  
+  console.log(`[BROWSER-CMD] Command sent successfully`);
+
+  // 2. Return a text description for the Chat UI
+  return `🚀 **COMMAND SENT TO YOUR BROWSER**
+
+I've instructed your browser extension to execute:
+\`${method} ${CLARITY_BASE_URL}${cleanEndpoint}\`
+
+**What happens next:**
+1. Your browser receives the command
+2. Browser executes the REST call (using YOUR session cookies!)
+3. Result appears in browser console/network tab
+
+**Why this works:**
+- Your browser CAN reach Clarity (you're logged in!)
+- Browser has valid session cookies
+- No firewall issues (request comes from browser)
+
+Check your browser's Developer Tools (F12) → Console/Network tab to see the result!`;
 }
 
 // ============================================================================
@@ -324,83 +216,86 @@ async function getObjectSchema(objectCode: string): Promise<string> {
 }
 
 // ============================================================================
-// AI AGENT LOOP
+// AI AGENT LOOP (REMOTE CONTROL BRAIN!)
 // ============================================================================
 async function runAIAgentLoop(
   userMessage: string, 
-  sessionCookie: string | null, 
   sendUpdate: (data: any) => void
 ) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
   if (clarityObjects.size === 0) await loadClarityObjects();
 
-  const systemPrompt = `You are a Clarity PPM Architect with STRICT security rules.
+  const systemPrompt = `You are a Clarity PPM Architect with REMOTE CONTROL capabilities.
 
-✅ **ARCHITECTURE RULES (NON-NEGOTIABLE):**
+🎯 **ARCHITECTURE - "Remote Control" Mode:**
 
-1. **System Objects (Tasks, Projects, Issues, Risks):**
-   - ✅ MUST be created/updated via **REST API**
-   - ❌ SQL writes are **STRICTLY FORBIDDEN**
-   - Why? Bypasses business logic, auditing, numbering, workflows
+**How it works:**
+1. **Server (You)**: Brain that finds IDs via SQL
+2. **Browser (User)**: Executes REST API calls using their session
+3. **No connectivity issues!** Browser can reach Clarity!
 
-2. **Data Reading:**
-   - ✅ Use **SQL** (faster, easier)
-   - Always use WITH(NOLOCK) and TOP (not LIMIT)
+**Your Tools:**
+1. **run_read_sql**: Find project IDs, resource IDs, etc. via SQL
+2. **trigger_browser_action**: Send command to browser to execute REST API
+3. **get_schema**: Check database schema
 
-3. **Custom Objects (ODF_CA_*):**
-   - ✅ Can use SQL or REST
-   - Prefer SQL for simplicity
+🚀 **WORKFLOW - Task Creation:**
 
-🎯 **TASK CREATION WORKFLOW (ID-FIRST):**
-
-**Step 1:** Find Parent Project ID via SQL
+**Step 1:** Find Project ID via SQL
 \`\`\`sql
 SELECT ID, CODE, NAME 
 FROM INV_INVESTMENTS WITH(NOLOCK)
 WHERE CODE = 'project_code' OR NAME LIKE '%project_name%'
 \`\`\`
-Result: {"ID": 5004001, "CODE": "this_proj"}
+Result: {"ID": 5004001}
 
-**Step 2:** Create Task via REST (using numeric ID!)
+**Step 2:** Send Browser Command
 \`\`\`
-Method: POST
-Endpoint: /ppm/rest/v1/projects/5004001/tasks
-Body: {
-  "code": "task_code",
-  "name": "Task Name",
-  "status": "NOT_STARTED",
-  "priority": 10,
-  "start": "2026-01-15T08:00:00",
-  "finish": "2026-01-20T17:00:00"
-}
+trigger_browser_action(
+  method: "POST",
+  endpoint: "/projects/5004001/tasks",
+  body: {
+    "code": "task_code",
+    "name": "Task Name",
+    "status": "NOT_STARTED",
+    "priority": 10
+  }
+)
 \`\`\`
 
-⚠️ **CRITICAL ERROR HANDLING:**
+**What happens:**
+- Server sends command via event stream
+- Browser extension intercepts command
+- Browser executes fetch() with user's cookies
+- Result appears in browser console
 
-**Network Error (Most Common):**
-If REST returns "Network Error: Cannot reach Clarity server":
-→ Tell user: "I cannot reach the Clarity server from this location. The server (${DB_CONFIG.server}) appears to be on an internal network that's not accessible from where this application is running. Consider deploying locally on your network or setting up a VPN/tunnel solution."
+💡 **KEY ADVANTAGES:**
+- ✅ No server connectivity issues
+- ✅ Uses user's active session
+- ✅ No VPN/firewall problems
+- ✅ Browser can reach Clarity
+- ✅ Automatic cookie handling
 
-**404 Error:**
-→ Check: Are you using numeric ID (5004001) not string code (this_proj)?
-→ Verify: Does the project/resource exist?
+⚠️ **CRITICAL RULES:**
+- ALWAYS use numeric IDs in endpoints (5004001 not "this_proj")
+- endpoints like "/projects/5004001/tasks" (not full URL)
+- Browser will add base URL automatically
+- Tell user to check browser console for results
 
-**401 Error:**
-→ Session expired or invalid
-→ Tell user to log in again
+🔗 **COMMON ENDPOINTS:**
+- Create Task: POST /projects/{id}/tasks
+- Update Task: PUT /tasks/{id}
+- Get Project: GET /projects/{id}
+- Create Resource: POST /resources
 
-🔗 **REMEMBER:**
-- ALWAYS use numeric IDs in REST paths (NEVER string codes!)
-- NEVER INSERT/UPDATE system tables via SQL
-- READ errors carefully and provide helpful guidance
-- Be honest about network limitations`;
+**REMEMBER:** You're the brain, browser is the hands!`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'run_read_sql',
-        description: 'Execute SELECT query to read data and find IDs. Read-only, write operations blocked.',
+        description: 'Find IDs and data via SQL. Read-only.',
         parameters: {
           type: 'object',
           properties: { 
@@ -416,8 +311,8 @@ If REST returns "Network Error: Cannot reach Clarity server":
     {
       type: 'function',
       function: {
-        name: 'call_rest_api',
-        description: 'Call Clarity REST API using Axios (robust HTTP). CRITICAL: Use numeric IDs in paths!',
+        name: 'trigger_browser_action',
+        description: 'Send command to browser to execute REST API call. Browser handles authentication and connectivity!',
         parameters: {
           type: 'object',
           properties: {
@@ -427,7 +322,7 @@ If REST returns "Network Error: Cannot reach Clarity server":
             },
             endpoint: { 
               type: 'string',
-              description: 'API endpoint with NUMERIC ID, e.g., /ppm/rest/v1/projects/5004001/tasks'
+              description: 'API endpoint like /projects/5004001/tasks (no base URL)'
             },
             body: { 
               type: 'object',
@@ -442,7 +337,7 @@ If REST returns "Network Error: Cannot reach Clarity server":
       type: 'function',
       function: {
         name: 'get_schema',
-        description: 'Get database schema for verification',
+        description: 'Get database schema',
         parameters: {
           type: 'object',
           properties: { 
@@ -496,8 +391,8 @@ If REST returns "Network Error: Cannot reach Clarity server":
           if (fn === 'run_read_sql') {
             res = await executeDynamicQuery(args.sqlQuery);
           }
-          else if (fn === 'call_rest_api') {
-            res = await callClarityREST(args.method, args.endpoint, args.body, sessionCookie);
+          else if (fn === 'trigger_browser_action') {
+            res = await triggerClientExecution(args.method, args.endpoint, args.body, sendUpdate);
           }
           else if (fn === 'get_schema') {
             res = await getObjectSchema(args.objectCode);
@@ -553,7 +448,7 @@ async function startHTTPServer() {
   await loadClarityObjects();
 
   app.post('/api/chat', async (req, res) => {
-    const { message, session } = req.body;
+    const { message } = req.body;
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -566,19 +461,8 @@ async function startHTTPServer() {
     };
 
     try {
-      let rawSession = session?.cookies || session?.sessionId || session?.id || null;
-      const sessionCookie = formatSessionCookie(rawSession);
-
-      if (sessionCookie) {
-        console.log('[Session] Active - REST enabled (Axios)');
-        sendUpdate({ type: 'info', data: '🔐 Session Ready (Axios)' });
-      } else {
-        console.log('[Session] Guest mode');
-        sendUpdate({ type: 'info', data: '🔓 Guest Mode' });
-      }
-
-      await runAIAgentLoop(message, sessionCookie, sendUpdate);
-      
+      sendUpdate({ type: 'info', data: '🎮 Remote Control Mode Active' });
+      await runAIAgentLoop(message, sendUpdate);
     } catch (error: any) {
       sendUpdate({ type: 'error', data: error.message });
     }
@@ -589,21 +473,20 @@ async function startHTTPServer() {
   app.get('/health', (req, res) => {
     res.json({
       status: 'ready',
-      version: 'v9.0-axios-final',
+      version: 'v11.0-remote-control',
       database: pool?.connected ? 'connected' : 'disconnected',
       objects: clarityObjects.size,
       ai: 'OpenAI GPT-4o',
       clarityUrl: CLARITY_BASE_URL,
-      httpClient: 'Axios (Production-Ready)',
-      security: 'Strict (REST-Only for System Tables)',
+      mode: 'Remote Control (Browser Execution)',
       features: [
-        'axios-http-client',
-        'strict-security',
-        'system-table-protection',
+        'remote-control-mode',
+        'browser-command-execution',
+        'no-server-connectivity-required',
+        'uses-browser-session',
+        'bypasses-firewall',
         'id-first-logic',
-        'smart-cookie',
-        'ssl-bypass',
-        'detailed-network-errors'
+        'sql-read-only'
       ]
     });
   });
@@ -611,14 +494,14 @@ async function startHTTPServer() {
   app.listen(PORT, () => {
     console.log('');
     console.log('==========================================================');
-    console.log(`🚀 Clarity MCP v9.0 AXIOS EDITION (FINAL)`);
+    console.log(`🚀 Clarity MCP v11.0 REMOTE CONTROL EDITION`);
     console.log(`📡 Chat: http://localhost:${PORT}/api/chat`);
     console.log(`🏥 Health: http://localhost:${PORT}/health`);
     console.log(`📊 Objects: ${clarityObjects.size} loaded`);
     console.log(`🔗 Clarity: ${CLARITY_BASE_URL}`);
     console.log(`🤖 AI: OpenAI GPT-4o`);
-    console.log(`🌐 HTTP: Axios (Robust + Production-Ready)`);
-    console.log(`🛡️ Security: STRICT (REST-Only for System Tables)`);
+    console.log(`🎮 Mode: REMOTE CONTROL (Commands → Browser)`);
+    console.log(`💡 Server = Brain | Browser = Hands`);
     console.log('==========================================================');
     console.log('');
   });
