@@ -3,13 +3,13 @@
 import sql from 'mssql';
 import express from 'express';
 import dotenv from 'dotenv';
+import axios from 'axios';
 import https from 'https';
-import http from 'http';
 
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v6.1 - SELF-HEALING EDITION (Smart Schema)");
+console.log("🚀 CLARITY MCP v9.0 - AXIOS EDITION (Robust REST)");
 console.log("==========================================================");
 
 // ============================================================================
@@ -22,8 +22,8 @@ const DB_CONFIG = {
   server: process.env.DB_SERVER || '16.16.83.171',
   database: process.env.DB_NAME || 'niku',
   requestTimeout: 60000,
-  options: {
-    encrypt: false,
+  options: { 
+    encrypt: false, 
     trustServerCertificate: true,
     enableArithAbort: true
   },
@@ -31,26 +31,18 @@ const DB_CONFIG = {
 };
 
 const CLARITY_BASE_URL = process.env.CLARITY_URL || `http://${DB_CONFIG.server}:8080`; 
-const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
-// ============================================================================
-// DIAGNOSTIC: CONNECTIVITY PROBE (Runs on Startup)
-// ============================================================================
-async function probeConnectivity() {
-  console.log(`[Probe] Checking REST API accessibility at ${CLARITY_BASE_URL}...`);
-  return new Promise((resolve) => {
-    const req = http.get(`${CLARITY_BASE_URL}/niku/nu`, (res) => {
-      console.log(`[Probe] ✅ REST Service is REACHABLE (Status: ${res.statusCode})`);
-      resolve(true);
-    });
-    req.on('error', (e) => {
-      console.error(`[Probe] ❌ REST Service UNREACHABLE: ${e.message}`);
-      console.error(`[Probe] ⚠️ Note: SQL will work, but REST (Task creation) will fail.`);
-      resolve(false);
-    });
-    req.setTimeout(3000, () => { req.destroy(); resolve(false); });
-  });
-}
+// AXIOS INSTANCE (Bypasses SSL, Handles Proxies, More Robust)
+const apiClient = axios.create({
+  baseURL: CLARITY_BASE_URL,
+  timeout: 15000, // 15s timeout
+  httpsAgent: new https.Agent({ 
+    rejectUnauthorized: false 
+  }),
+  proxy: false, // Force direct connection (change if using proxy)
+  maxRedirects: 5,
+  validateStatus: (status) => status < 600 // Don't throw on 4xx/5xx
+});
 
 // ============================================================================
 // TABLE MAP
@@ -80,7 +72,7 @@ interface ClarityObject {
 let clarityObjects: Map<string, ClarityObject> = new Map();
 
 // ============================================================================
-// DATABASE CONNECTION
+// DATABASE
 // ============================================================================
 let pool: sql.ConnectionPool | null = null;
 
@@ -122,38 +114,13 @@ async function loadClarityObjects() {
 }
 
 // ============================================================================
-// HELPER: SMART SCHEMA SUGGESTER (SELF-HEALING!)
-// ============================================================================
-async function findSimilarColumns(tableName: string, targetCol: string): Promise<string> {
-  try {
-    const db = await getPool();
-    const result = await db.request().query(`
-      SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
-      WHERE TABLE_NAME = '${tableName}' 
-      AND (
-        COLUMN_NAME LIKE '%${targetCol}%' 
-        OR COLUMN_NAME LIKE '%STATUS%' 
-        OR COLUMN_NAME LIKE '%ACTIVE%'
-        OR COLUMN_NAME LIKE '%OPEN%'
-      )
-      ORDER BY COLUMN_NAME
-    `);
-    
-    if (result.recordset.length > 0) {
-      return result.recordset.map((r: any) => r.COLUMN_NAME).join(', ');
-    }
-    return "No similar columns found.";
-  } catch { 
-    return "Unable to check schema."; 
-  }
-}
-
-// ============================================================================
 // SMART COOKIE FORMATTER
 // ============================================================================
 function formatSessionCookie(rawValue: any): string | null {
   if (!rawValue) return null;
   let val = String(rawValue).trim();
+
+  console.log(`[Cookie] Raw: ${val.substring(0, 30)}...`);
 
   if (val.includes('JSESSIONID=')) {
     const match = val.match(/JSESSIONID=([^;]+)/);
@@ -164,22 +131,35 @@ function formatSessionCookie(rawValue: any): string | null {
   }
 
   val = val.replace(/['";]/g, '');
-  return `JSESSIONID=${val}`;
+
+  const formatted = `JSESSIONID=${val}`;
+  console.log(`[Cookie] Formatted: ${formatted.substring(0, 30)}...`);
+  
+  return formatted;
 }
 
 // ============================================================================
-// TOOL 1: DYNAMIC SQL (WITH SELF-HEALING!)
+// TOOL 1: DYNAMIC SQL (READ ONLY - SYSTEM TABLES PROTECTED)
 // ============================================================================
 async function executeDynamicQuery(sqlQuery: string): Promise<string> {
-  const forbidden = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'TRUNCATE', 'GRANT', 'EXEC'];
+  const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'EXEC'];
   const upperSQL = sqlQuery.toUpperCase().trim();
+  
+  // Block all write operations - must use REST for system tables
+  if (forbidden.some(w => upperSQL.includes(` ${w} `))) {
+    return `❌ Security Block: System tables must be updated via REST API only.
+
+**Why?** Direct SQL writes bypass:
+- Business logic (numbering, workflows)
+- Auditing and history
+- Data validation
+- Process triggers
+
+**Solution:** Use the REST API tool instead.`;
+  }
   
   if (!upperSQL.startsWith('SELECT') && !upperSQL.startsWith('WITH')) {
     return '❌ Security: Only SELECT queries allowed.';
-  }
-  
-  if (forbidden.some(w => upperSQL.includes(` ${w} `))) {
-    return '❌ Security: Forbidden keyword detected.';
   }
   
   if (upperSQL.includes('LIMIT ')) {
@@ -198,50 +178,12 @@ async function executeDynamicQuery(sqlQuery: string): Promise<string> {
     return JSON.stringify(result.recordset.slice(0, 100), null, 2);
   } catch (error: any) {
     console.error(`[SQL Error] ${error.message}`);
-    
-    // --- SMART ERROR HANDLING - SELF-HEALING! ---
-    if (error.message.includes("Invalid column name")) {
-      const badColMatch = error.message.match(/'([^']+)'/);
-      const badCol = badColMatch ? badColMatch[1] : "unknown";
-      
-      // Extract table name from query
-      const tableMatch = sqlQuery.match(/FROM\s+([A-Z0-9_]+)/i);
-      const tableName = tableMatch ? tableMatch[1] : null;
-
-      let suggestion = "";
-      if (tableName) {
-        // Special handling for "ACTIVE" confusion
-        if (badCol.toUpperCase() === 'IS_ACTIVE') {
-           if (tableName.toUpperCase().includes('PRTASK')) {
-             suggestion = "For Tasks, use 'PRSTATUS != 2' (2=Completed) OR 'IS_OPEN_FOR_TE = 1'.";
-           }
-           else if (tableName.toUpperCase().includes('INV_INVESTMENTS')) {
-             suggestion = "For Projects, 'IS_ACTIVE' should exist. Try checking the exact column name with get_schema.";
-           }
-           else {
-             const similar = await findSimilarColumns(tableName, 'ACTIVE');
-             suggestion = `Similar columns in ${tableName}: [${similar}]`;
-           }
-        } else {
-           // Generic column search
-           const similar = await findSimilarColumns(tableName, badCol.substring(0, 4));
-           suggestion = `Similar columns in ${tableName}: ${similar}`;
-        }
-      }
-
-      return `❌ SQL Schema Error: Column '${badCol}' not found${tableName ? ` in table '${tableName}'` : ''}.
-
-💡 SMART TIP: ${suggestion}
-
-🔧 ACTION: Update your query with the correct column name and retry automatically.`;
-    }
-
-    return `❌ SQL Error: ${error.message}`; 
+    return `❌ SQL Error: ${error.message}`;
   }
 }
 
 // ============================================================================
-// TOOL 2: REST API
+// TOOL 2: REST API (AXIOS POWERED - MORE ROBUST!)
 // ============================================================================
 async function callClarityREST(
   method: string, 
@@ -254,55 +196,76 @@ async function callClarityREST(
   }
 
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-  const url = `${CLARITY_BASE_URL}${cleanEndpoint}`;
-
-  console.log(`[REST] ${method} ${url}`);
-  if (body) console.log(`[REST] Body:`, JSON.stringify(body, null, 2));
-
+  
+  console.log(`[REST-AXIOS] ${method} ${CLARITY_BASE_URL}${cleanEndpoint}`);
+  if (body) console.log(`[REST-AXIOS] Body:`, JSON.stringify(body, null, 2));
+  
   try {
-    const fetchOptions: any = {
+    const response = await apiClient.request({
       method: method,
+      url: cleanEndpoint,
+      data: body,
       headers: {
         'Content-Type': 'application/json',
         'Cookie': sessionCookie,
         'Accept': 'application/json'
-      },
-      body: body ? JSON.stringify(body) : undefined
-    };
-
-    if (url.startsWith('https')) {
-      fetchOptions.agent = insecureAgent;
-    }
-
-    const response = await fetch(url, fetchOptions);
-    const text = await response.text();
-    
-    console.log(`[REST] Status: ${response.status}`);
-    
-    if (!response.ok) {
-      if (response.status === 404) {
-        return `❌ Error 404: Endpoint not found. 
-
-💡 TIP: Make sure you're using numeric ID, not string code.
-Example: /ppm/rest/v1/projects/5004001/tasks (not /projects/this_proj/tasks)`;
       }
-      return `❌ API Error (${response.status}): ${text.substring(0, 400)}`;
-    }
+    });
 
-    try {
-      const json = JSON.parse(text);
-      return JSON.stringify(json, null, 2);
-    } catch {
-      return text;
-    }
+    console.log(`[REST-AXIOS] Success: ${response.status}`);
+    
+    // Axios automatically parses JSON
+    return JSON.stringify(response.data, null, 2);
+
   } catch (error: any) {
-    console.error(`[Network Error] ${error.message}`);
-    return `❌ Network Error: ${error.message}
+    // DETAILED AXIOS ERROR LOGGING
+    if (error.response) {
+      // Server responded with error status (4xx, 5xx)
+      console.error(`[REST Error] Status: ${error.response.status}`);
+      console.error(`[REST Error] Data:`, error.response.data);
+      
+      if (error.response.status === 404) {
+        return `❌ API Error 404: Endpoint not found.
 
-**Troubleshooting:**
-- Check if Clarity server is reachable from this network
-- Verify CLARITY_URL: ${CLARITY_BASE_URL}
-- Check firewall/VPN settings`;
+**Common causes:**
+- Wrong endpoint format
+- Using string code instead of numeric ID
+- Resource doesn't exist
+
+**Check:**
+- Endpoint: ${cleanEndpoint}
+- Did you use numeric ID? (e.g., /projects/5004001/tasks)`;
+      }
+      
+      return `❌ API Error (${error.response.status}): ${JSON.stringify(error.response.data, null, 2)}`;
+      
+    } else if (error.request) {
+      // Request made but NO response received (Network Error)
+      console.error(`[Network Error] No response from server`);
+      console.error(`[Network Error] Code: ${error.code}`);
+      console.error(`[Network Error] Message: ${error.message}`);
+      
+      return `❌ Network Error: Cannot reach Clarity server at ${CLARITY_BASE_URL}
+
+**Error Code:** ${error.code || 'UNKNOWN'}
+**Details:** ${error.message}
+
+**Possible causes:**
+- Server is down or unreachable
+- Firewall blocking connection
+- VPN not connected
+- Wrong CLARITY_URL in environment
+
+**If running on Railway:**
+- Railway (cloud) cannot reach ${DB_CONFIG.server} (internal IP)
+- Consider deploying locally on your network
+- Or setup VPN/tunnel (Cloudflare Tunnel, Tailscale, etc.)`;
+      
+    } else {
+      // Something else happened
+      console.error(`[Client Error] ${error.message}`);
+      return `❌ Client Error: ${error.message}`;
+    }
   }
 }
 
@@ -311,12 +274,14 @@ Example: /ppm/rest/v1/projects/5004001/tasks (not /projects/this_proj/tasks)`;
 // ============================================================================
 async function getObjectSchema(objectCode: string): Promise<string> {
   const obj = clarityObjects.get(objectCode.toUpperCase());
-  if (!obj) return `Object '${objectCode}' not found. Available objects: ${Array.from(clarityObjects.keys()).slice(0, 10).join(', ')}...`;
+  if (!obj) {
+    return `Object '${objectCode}' not found. Available: ${Array.from(clarityObjects.keys()).slice(0, 10).join(', ')}...`;
+  }
   
   try {
     const db = await getPool();
     const q = `
-      SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+      SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
       FROM INFORMATION_SCHEMA.COLUMNS 
       WHERE TABLE_NAME = '${obj.tableName}'
       ORDER BY ORDINAL_POSITION
@@ -326,16 +291,15 @@ async function getObjectSchema(objectCode: string): Promise<string> {
     return JSON.stringify({ 
       object: obj.objectName, 
       table: obj.tableName, 
-      columnCount: res.recordset.length,
       columns: res.recordset 
     }, null, 2);
   } catch (e: any) { 
-    return `Error getting schema: ${e.message}`; 
+    return `Error: ${e.message}`; 
   }
 }
 
 // ============================================================================
-// AI AGENT LOOP (SELF-HEALING BRAIN!)
+// AI AGENT LOOP
 // ============================================================================
 async function runAIAgentLoop(
   userMessage: string, 
@@ -345,67 +309,77 @@ async function runAIAgentLoop(
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
   if (clarityObjects.size === 0) await loadClarityObjects();
 
-  const systemPrompt = `You are a Clarity PPM Expert with SELF-HEALING abilities.
+  const systemPrompt = `You are a Clarity PPM Architect with strict security rules.
 
-🕵️‍♂️ **CRITICAL: "ACTIVE" LOGIC BY OBJECT TYPE:**
+✅ **ARCHITECTURE RULES:**
 
-**Tasks (PRTASK):**
-- ❌ DO NOT use 'IS_ACTIVE' (doesn't exist!)
-- ✅ Use: \`PRSTATUS != 2\` (2 = Completed)
-- ✅ Or: \`IS_OPEN_FOR_TE = 1\` (Open for time entry)
+1. **System Objects (Tasks, Projects, Issues, Risks):**
+   - MUST be created/updated via **REST API**
+   - SQL writes are STRICTLY FORBIDDEN
+   - Why? Business logic, auditing, numbering, workflows
 
-**Projects (INV_INVESTMENTS):**
-- ✅ Use: \`IS_ACTIVE = 1\`
-- If fails, use get_schema to check exact column name
+2. **Data Reading:**
+   - Use **SQL** (faster, easier)
+   - Always use WITH(NOLOCK) and TOP (not LIMIT)
 
-**Resources (SRM_RESOURCES):**
-- ✅ Use: \`IS_ACTIVE = 1\`
+3. **Custom Objects (ODF_CA_*):**
+   - Can use SQL or REST
+   - Prefer SQL for simplicity
 
-🛠️ **SELF-HEALING WORKFLOW:**
+🎯 **TASK CREATION WORKFLOW:**
 
-1. **Try your best query first**
-2. **If it fails with "Invalid column":**
-   - READ the error message carefully
-   - The system suggests the correct column
-   - IMMEDIATELY retry with the corrected column
-   - DO NOT ask the user for help
-3. **Success!**
+Step 1: Find Parent Project ID via SQL
+\`\`\`sql
+SELECT ID, CODE, NAME 
+FROM INV_INVESTMENTS WITH(NOLOCK)
+WHERE CODE = 'project_code' OR NAME LIKE '%project_name%'
+\`\`\`
+Result: ID = 5004001
 
-💡 **EXAMPLE - Self-Healing in Action:**
+Step 2: Create Task via REST
+\`\`\`
+Method: POST
+Endpoint: /ppm/rest/v1/projects/5004001/tasks
+Body: {
+  "code": "task_code",
+  "name": "Task Name",
+  "status": "NOT_STARTED",
+  "priority": 10,
+  "start": "2026-01-10T08:00:00",
+  "finish": "2026-01-15T17:00:00"
+}
+\`\`\`
 
-User: "How many active tasks?"
+⚠️ **ERROR HANDLING:**
 
-Attempt 1:
-\`SELECT COUNT(*) FROM PRTASK WHERE IS_ACTIVE = 1\`
-→ ❌ Error: "Column 'IS_ACTIVE' not found. TIP: Use 'PRSTATUS != 2' or 'IS_OPEN_FOR_TE = 1'"
+**Network Error:**
+If REST fails with "Network Error", tell user:
+"I cannot reach the Clarity server from this location. This is likely because:
+- The server is on an internal network (${DB_CONFIG.server})
+- This application is running in the cloud
+- Solution: Deploy locally on your network or setup VPN/tunnel"
 
-Attempt 2 (AUTO-RETRY):
-\`SELECT COUNT(*) FROM PRTASK WHERE PRSTATUS != 2\`
-→ ✅ Success! Returns count
+**404 Error:**
+Check if you're using numeric ID (not string code) in the path.
 
-🎯 **ID-FIRST FOR REST:**
-- Always get numeric ID via SQL before REST calls
-- Example: \`SELECT ID FROM INV_INVESTMENTS WHERE CODE='proj'\`
-- Then: POST /ppm/rest/v1/projects/{ID}/tasks
-
-⚠️ **RULES:**
-- Use WITH(NOLOCK) in SQL queries
-- Use TOP (not LIMIT)
-- Self-correct automatically when schema errors occur
-- Never give up after first error - always retry with fix`;
+🔗 **CRITICAL RULES:**
+- ALWAYS use numeric IDs in REST paths (not string codes!)
+- NEVER INSERT/UPDATE system tables via SQL
+- READ the error messages and act on suggestions
+- Self-correct when schema errors occur`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'run_read_sql',
-        description: 'Execute SELECT query. If it fails with schema error, the system will suggest fixes - retry immediately with the correction!',
+        description: 'Execute SELECT query to read data and find IDs. Read-only.',
         parameters: {
           type: 'object',
           properties: { 
             sqlQuery: { 
               type: 'string',
-              description: 'MS SQL SELECT query with WITH(NOLOCK) and TOP'
+              description: 'MS SQL SELECT with WITH(NOLOCK) and TOP'
             } 
           },
           required: ['sqlQuery']
@@ -416,7 +390,7 @@ Attempt 2 (AUTO-RETRY):
       type: 'function',
       function: {
         name: 'call_rest_api',
-        description: 'Call Clarity REST API. CRITICAL: Use numeric IDs (not string codes) in paths!',
+        description: 'Call Clarity REST API using Axios (robust HTTP client). Use numeric IDs in paths!',
         parameters: {
           type: 'object',
           properties: {
@@ -430,7 +404,7 @@ Attempt 2 (AUTO-RETRY):
             },
             body: { 
               type: 'object',
-              description: 'JSON payload for POST/PUT'
+              description: 'JSON payload'
             }
           },
           required: ['method', 'endpoint']
@@ -441,14 +415,11 @@ Attempt 2 (AUTO-RETRY):
       type: 'function',
       function: {
         name: 'get_schema',
-        description: 'Get database schema (columns, types) for any object. Use this to verify column names BEFORE writing SQL.',
+        description: 'Get database schema for any object',
         parameters: {
           type: 'object',
           properties: { 
-            objectCode: { 
-              type: 'string',
-              description: 'Object code like task, project, resource, etc.'
-            } 
+            objectCode: { type: 'string' } 
           },
           required: ['objectCode']
         }
@@ -551,7 +522,6 @@ async function startHTTPServer() {
     next();
   });
 
-  await probeConnectivity();
   await getPool();
   await loadClarityObjects();
 
@@ -574,7 +544,7 @@ async function startHTTPServer() {
 
       if (sessionCookie) {
         console.log('[Session] Active - REST enabled');
-        sendUpdate({ type: 'info', data: '🔐 Session Ready' });
+        sendUpdate({ type: 'info', data: '🔐 Session Ready (Axios)' });
       } else {
         console.log('[Session] Guest mode');
         sendUpdate({ type: 'info', data: '🔓 Guest Mode' });
@@ -592,19 +562,19 @@ async function startHTTPServer() {
   app.get('/health', (req, res) => {
     res.json({
       status: 'ready',
-      version: 'v6.1-self-healing',
+      version: 'v9.0-axios',
       database: pool?.connected ? 'connected' : 'disconnected',
       objects: clarityObjects.size,
       ai: 'OpenAI GPT-4o',
       clarityUrl: CLARITY_BASE_URL,
+      httpClient: 'Axios (robust)',
       features: [
-        'self-healing-sql',
-        'smart-schema-detection',
-        'auto-error-recovery',
-        'connectivity-probe',
+        'axios-http-client',
+        'system-table-protection',
         'id-first-logic',
-        'cookie-cleaning',
-        'ssl-bypass'
+        'smart-cookie',
+        'ssl-bypass',
+        'detailed-errors'
       ]
     });
   });
@@ -612,13 +582,14 @@ async function startHTTPServer() {
   app.listen(PORT, () => {
     console.log('');
     console.log('==========================================================');
-    console.log(`🚀 Clarity MCP v6.1 SELF-HEALING EDITION`);
+    console.log(`🚀 Clarity MCP v9.0 AXIOS EDITION`);
     console.log(`📡 Chat: http://localhost:${PORT}/api/chat`);
     console.log(`🏥 Health: http://localhost:${PORT}/health`);
     console.log(`📊 Objects: ${clarityObjects.size} loaded`);
     console.log(`🔗 Clarity: ${CLARITY_BASE_URL}`);
-    console.log(`🤖 AI: OpenAI GPT-4o (Self-Healing)`);
-    console.log(`🔧 Features: Auto-recovery + Smart Schema + Connectivity Probe`);
+    console.log(`🤖 AI: OpenAI GPT-4o`);
+    console.log(`🌐 HTTP: Axios (Robust + Proxy Support)`);
+    console.log(`🛡️ Security: System Tables Protected (REST Only)`);
     console.log('==========================================================');
     console.log('');
   });
