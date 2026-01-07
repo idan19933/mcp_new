@@ -468,84 +468,121 @@ Step 4: execute_server_sql
 
   // Multi-turn reasoning loop (up to 10 iterations)
   let iteration = 0;
-  while (iteration < 10) {
+  const MAX_ITERATIONS = 10;
+  const REQUEST_TIMEOUT = 25000; // 25 seconds per request
+  
+  while (iteration < MAX_ITERATIONS) {
     iteration++;
-    sendUpdate({ type: 'thinking', data: `Investigating... (${iteration}/10)` });
+    sendUpdate({ type: 'thinking', data: `Investigating... (${iteration}/${MAX_ITERATIONS})` });
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json', 
-        'Authorization': `Bearer ${OPENAI_API_KEY}` 
-      },
-      body: JSON.stringify({ 
-        model: 'gpt-4o', 
-        messages, 
-        tools,
-        tool_choice: 'auto'
-      })
-    });
+    try {
+      // Create abort controller for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
-    const data: any = await response.json();
-    const msg = data.choices?.[0]?.message;
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json', 
+          'Authorization': `Bearer ${OPENAI_API_KEY}` 
+        },
+        body: JSON.stringify({ 
+          model: 'gpt-4o', 
+          messages, 
+          tools,
+          tool_choice: 'auto'
+        }),
+        signal: controller.signal
+      });
 
-    if (!msg) throw new Error('Invalid AI response');
+      clearTimeout(timeoutId);
 
-    // Tool calls - continue investigation
-    if (msg.tool_calls?.length > 0) {
-      messages.push(msg);
-      
-      for (const call of msg.tool_calls) {
-        const fn = call.function.name;
-        const args = JSON.parse(call.function.arguments);
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data: any = await response.json();
+      const msg = data.choices?.[0]?.message;
+
+      if (!msg) {
+        throw new Error('Invalid AI response - no message');
+      }
+
+      // Tool calls - continue investigation
+      if (msg.tool_calls?.length > 0) {
+        messages.push(msg);
         
-        sendUpdate({ type: 'tool', data: `🔍 ${fn}` });
-        
-        let res = '';
-        try {
-          if (fn === 'lookup_object') {
-            res = await lookupObject(args.objectCode);
-          }
-          else if (fn === 'investigate_table') {
-            res = await investigateTable(args.tableName);
-          }
-          else if (fn === 'find_column') {
-            res = await findColumn(args.tableName, args.keyword);
-          }
-          else if (fn === 'execute_server_sql') {
-            res = await executeServerSQL(args.sqlQuery);
-          }
-          else if (fn === 'trigger_browser_action') {
-            res = await triggerBrowserAction(args.method, args.endpoint, args.body, sendUpdate);
-          }
-          else {
-            res = `Unknown tool: ${fn}`;
+        for (const call of msg.tool_calls) {
+          const fn = call.function.name;
+          let args;
+          
+          try {
+            args = JSON.parse(call.function.arguments);
+          } catch (e) {
+            console.error('[Tool] Failed to parse arguments:', call.function.arguments);
+            args = {};
           }
           
-          sendUpdate({ type: 'step', data: '✅' });
-        } catch (e: any) {
-          res = `Error: ${e.message}`;
-          sendUpdate({ type: 'step', data: '❌' });
+          sendUpdate({ type: 'tool', data: `🔍 ${fn}` });
+          
+          let res = '';
+          try {
+            if (fn === 'lookup_object') {
+              res = await lookupObject(args.objectCode || '');
+            }
+            else if (fn === 'investigate_table') {
+              res = await investigateTable(args.tableName || '');
+            }
+            else if (fn === 'find_column') {
+              res = await findColumn(args.tableName || '', args.keyword || '');
+            }
+            else if (fn === 'execute_server_sql') {
+              res = await executeServerSQL(args.sqlQuery || '');
+            }
+            else if (fn === 'trigger_browser_action') {
+              res = await triggerBrowserAction(args.method || 'GET', args.endpoint || '/', args.body, sendUpdate);
+            }
+            else {
+              res = `Unknown tool: ${fn}`;
+            }
+            
+            sendUpdate({ type: 'step', data: '✅' });
+          } catch (e: any) {
+            console.error(`[Tool] Error in ${fn}:`, e);
+            res = `Error: ${e.message}`;
+            sendUpdate({ type: 'step', data: '❌' });
+          }
+          
+          messages.push({ 
+            role: 'tool', 
+            tool_call_id: call.id, 
+            content: res 
+          });
         }
         
-        messages.push({ 
-          role: 'tool', 
-          tool_call_id: call.id, 
-          content: res 
-        });
+        // Continue loop for next iteration
+        continue;
+      }
+
+      // Final answer
+      if (msg.content) {
+        sendUpdate({ type: 'complete', data: msg.content });
+        return msg.content;
       }
       
-      // Continue loop for next iteration
-      continue;
+      break;
+      
+    } catch (e: any) {
+      console.error(`[AI] Error in iteration ${iteration}:`, e);
+      
+      if (e.name === 'AbortError') {
+        sendUpdate({ type: 'error', data: 'Request timeout - please try a simpler question' });
+      } else {
+        sendUpdate({ type: 'error', data: `Error: ${e.message}` });
+      }
+      
+      return `Error after ${iteration} iterations: ${e.message}`;
     }
-
-    // Final answer
-    if (msg.content) {
-      sendUpdate({ type: 'complete', data: msg.content });
-      return msg.content;
-    }
-    
-    break;
   }
   
   return 'Investigation complete (max iterations reached)';
