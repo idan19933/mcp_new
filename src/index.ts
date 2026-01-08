@@ -8,7 +8,7 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v17.2 - SCHEMA MASTER (Smart Lookups)");
+console.log("🚀 CLARITY MCP v17.3 - SEARCH ENGINE (Smart NSQL Finder)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -212,7 +212,7 @@ async function triggerBrowserAction(
 }
 
 // ============================================================================
-// AI AGENT LOOP (Schema Master)
+// AI AGENT LOOP (The Search Engine Brain)
 // ============================================================================
 async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => void) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
@@ -224,64 +224,45 @@ async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => vo
 
   const dbStatus = dbConnected ? '✅ DB ONLINE' : '⚠️ DB OFFLINE';
 
-  const systemPrompt = `You are **Clarity Master** - A database expert who understands schema relationships.
+  const systemPrompt = `You are **Clarity Master** - A smart search engine for Clarity PPM.
 
 STATUS: ${dbStatus}
 
-🧠 **CLARITY SCHEMA MAP (Critical Knowledge):**
+🔍 **SEARCH STRATEGY (How to find things):**
 
-1. **LOOKUPS (Dynamic) - The JOIN Path:**
-   - Definition Table: \`CMN_LOOKUP_TYPES\`
-   - Query Table: \`CMN_NSQL_QUERIES\`
-   - **JOIN Column:** \`DYNAMIC_QUERY_ID\` = \`ID\`
-   
-   **Query to find NSQL for a Lookup:**
-   \`\`\`sql
-   SELECT l.LOOKUP_TYPE, l.LOOKUP_NAME, q.NSQL_TEXT, q.CODE
-   FROM CMN_LOOKUP_TYPES l WITH(NOLOCK)
-   JOIN CMN_NSQL_QUERIES q WITH(NOLOCK) ON l.DYNAMIC_QUERY_ID = q.ID
-   WHERE l.LOOKUP_TYPE = 'YOUR_LOOKUP_ID_HERE'
-   \`\`\`
+1. **FINDING NSQL FOR LOOKUPS:**
+   - The Lookup ID is often INSIDE the SQL text itself!
+   - **Smart Search:** \`SELECT query_code, nsql_text FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE nsql_text LIKE '%LOOKUP_ID_HERE%'\`
+   - Example: Looking for 'LOOKUP_CHARGE_CODES'? Search: \`WHERE nsql_text LIKE '%LOOKUP_CHARGE_CODES%'\`
+   - **DO NOT** try to join tables unless you're 100% sure of column names
 
-2. **LOOKUPS (Static) - Direct Values:**
-   - Stored in: \`CMN_LOOKUPS_V\`
-   - Query:
-   \`\`\`sql
-   SELECT LOOKUP_CODE, DESCRIPTION 
-   FROM CMN_LOOKUPS_V WITH(NOLOCK)
-   WHERE LOOKUP_TYPE = 'YOUR_LOOKUP_ID'
-   AND LANGUAGE_CODE = 'en'
-   \`\`\`
+2. **FINDING LOOKUP DEFINITIONS:**
+   - Search: \`SELECT * FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%SEARCH_TERM%'\`
 
-3. **STANDARD OBJECTS:**
-   - Projects: \`INV_INVESTMENTS\`
-   - Tasks: \`PRTASK\`
-   - Resources: \`SRM_RESOURCES\`
-   - Custom: \`ODF_CA_{CODE}\`
+3. **FINDING LOOKUP VALUES:**
+   - Search: \`SELECT * FROM CMN_LOOKUPS_V WITH(NOLOCK) WHERE LOOKUP_TYPE = 'EXACT_TYPE' AND LANGUAGE_CODE = 'en'\`
 
-🚀 **CRITICAL STRATEGY:**
+4. **FINDING OBJECT TABLES:**
+   - Use \`lookup_object\` first
+   - If fails: \`SELECT code FROM ODF_OBJECTS WITH(NOLOCK) WHERE code LIKE '%SEARCH%'\`
 
-When user asks: "Find NSQL for Lookup X"
-❌ WRONG: Search CMN_NSQL_QUERIES directly
-✅ RIGHT: Use the JOIN query from #1 above
+5. **CREATING TASKS/RECORDS:**
+   - Use \`trigger_browser_action\`
+   - Always verify afterwards with SQL
 
-When user asks: "Find Lookup values"
-Step 1: Search CMN_LOOKUP_TYPES to find the LOOKUP_TYPE
-Step 2: Query CMN_LOOKUPS_V with that LOOKUP_TYPE
-
-⚠️ **ABSOLUTE RULES:**
+⚠️ **CRITICAL RULES:**
 - ALWAYS use \`WITH(NOLOCK)\`
-- ALWAYS use \`TOP 100\` to limit results
-- If lookup_object fails, switch to SQL immediately
-- For task creation, verify afterwards with SQL
-- Never give up after one failed tool`;
+- ALWAYS use \`TOP 100\` to limit results  
+- Use LIKE search for flexible matching
+- Never give up after one failed tool
+- Verify all creations with SELECT query`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'execute_server_sql',
-        description: 'Run SQL query. Essential for Lookups, JOINs, and Verification.',
+        description: 'Run SQL query. Best tool for searching NSQL, Lookups, and verification.',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -295,7 +276,7 @@ Step 2: Query CMN_LOOKUPS_V with that LOOKUP_TYPE
       type: 'function',
       function: {
         name: 'lookup_object',
-        description: 'Check table names for standard objects only.',
+        description: 'Check table names for standard objects.',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -323,7 +304,7 @@ Step 2: Query CMN_LOOKUPS_V with that LOOKUP_TYPE
       type: 'function',
       function: {
         name: 'trigger_browser_action',
-        description: 'Send Create/Update command to browser for execution.',
+        description: 'Send Create/Update command to browser.',
         parameters: {
           type: 'object',
           properties: {
@@ -462,16 +443,16 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v17.2-schema-master',
+    version: 'v17.3-search-engine',
     database: dbConnected ? 'online' : 'offline',
     mode: dbConnected ? 'smart-mode' : 'remote-control-mode',
     objects: clarityObjects.size,
     features: [
-      'schema-joins',
-      'lookup-nsql-intelligence',
+      'like-search',
+      'nsql-finder',
       'auto-task-fields',
       'multi-step-reasoning',
-      'never-gives-up'
+      'smart-search-engine'
     ]
   });
 });
@@ -504,10 +485,10 @@ app.post('/api/chat', async (req, res) => {
 app.listen(PORT, HOST, async () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v17.2 SCHEMA MASTER`);
+  console.log(`🚀 CLARITY MCP v17.3 SEARCH ENGINE`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`🔗 Features: JOIN Intelligence, Lookup NSQL, Auto Fields`);
+  console.log(`🔍 Features: LIKE Search, Smart NSQL Finder, Auto Fields`);
   console.log('==========================================================');
   console.log('');
   
