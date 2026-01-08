@@ -8,7 +8,7 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v17.3 - SEARCH ENGINE (Smart NSQL Finder)");
+console.log("🚀 CLARITY MCP v17.4 - STRICT REST ENFORCER");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -101,7 +101,7 @@ async function loadClarityObjects() {
 }
 
 // ============================================================================
-// TOOLS
+// TOOLS (The Enforcer)
 // ============================================================================
 async function executeServerSQL(sqlQuery: string): Promise<string> {
   if (!dbConnected) {
@@ -111,11 +111,21 @@ async function executeServerSQL(sqlQuery: string): Promise<string> {
     }
   }
   
-  const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE'];
+  // 🛑 FIREWALL: STRICTLY BLOCK WRITES 🛑
+  const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE'];
   const upperSQL = sqlQuery.toUpperCase();
   
-  if (forbidden.some(w => upperSQL.includes(` ${w} `) || upperSQL.includes(`\n${w} `))) {
-    return '❌ Security: SQL is Read-Only. Use browser actions for updates.';
+  if (forbidden.some(w => upperSQL.includes(` ${w} `) || upperSQL.includes(`\n${w} `) || upperSQL.startsWith(w))) {
+    return `⛔ STRICT SECURITY BLOCK:
+
+You tried to run: "${sqlQuery.substring(0, 100)}..."
+
+Writing to Clarity via SQL is FORBIDDEN because it corrupts the database (missing IDs, auditing, slices).
+
+👉 YOU MUST USE 'trigger_browser_action' (REST API) TO CREATE OR UPDATE DATA.
+
+Example:
+trigger_browser_action('POST', '/projects/5004001/tasks', { name: 'Task Name' })`;
   }
 
   try {
@@ -168,7 +178,7 @@ async function lookupObject(objectCode: string): Promise<string> {
   const obj = clarityObjects.get(code);
   
   if (!obj) {
-    return `❌ Object '${objectCode}' not found. Try searching via SQL.`;
+    return `❌ Object '${objectCode}' not found.`;
   }
   
   return `✅ Object: ${obj.code}
@@ -183,18 +193,32 @@ async function triggerBrowserAction(
 ): Promise<string> {
   const browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
   
-  // Auto-add required fields for task creation
+  // 🧠 SMART DEFAULTS FOR TASKS
   if (endpoint.includes('tasks') && method === 'POST') {
-    if (!body.start) body.start = new Date().toISOString();
+    if (!body.code) {
+      body.code = `TASK_${Date.now().toString().slice(-6)}`; // Auto Code
+    }
+    if (!body.start) {
+      body.start = new Date().toISOString();
+    }
     if (!body.finish) {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       body.finish = tomorrow.toISOString();
     }
-    if (!body.status) body.status = 'NOT_STARTED';
+    if (!body.status) {
+      body.status = '0'; // '0' = Not Started
+    }
+    if (!body.priority) {
+      body.priority = 10;
+    }
+    if (!body.isOpenForTimeEntry) {
+      body.isOpenForTimeEntry = true;
+    }
   }
   
   console.log(`[Browser-CMD] ${method} ${browserUrl}`);
+  console.log(`[Browser-Body]`, JSON.stringify(body, null, 2));
   
   sendUpdate({
     type: 'client_execute',
@@ -206,13 +230,13 @@ async function triggerBrowserAction(
     }
   });
   
-  return `🚀 Command sent to browser: ${method} ${browserUrl}
+  return `🚀 REST Command Sent: ${method} ${browserUrl}
 
-⚠️ **WAIT & VERIFY:** Check database for result.`;
+👉 Now checking database for confirmation...`;
 }
 
 // ============================================================================
-// AI AGENT LOOP (The Search Engine Brain)
+// AI AGENT LOOP (Strict REST Enforcer)
 // ============================================================================
 async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => void) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
@@ -224,45 +248,57 @@ async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => vo
 
   const dbStatus = dbConnected ? '✅ DB ONLINE' : '⚠️ DB OFFLINE';
 
-  const systemPrompt = `You are **Clarity Master** - A smart search engine for Clarity PPM.
+  const systemPrompt = `You are **Clarity Master** - A strict REST-only assistant.
 
 STATUS: ${dbStatus}
 
-🔍 **SEARCH STRATEGY (How to find things):**
+🛡️ **THE LAW (ABSOLUTE RULES):**
 
-1. **FINDING NSQL FOR LOOKUPS:**
-   - The Lookup ID is often INSIDE the SQL text itself!
-   - **Smart Search:** \`SELECT query_code, nsql_text FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE nsql_text LIKE '%LOOKUP_ID_HERE%'\`
-   - Example: Looking for 'LOOKUP_CHARGE_CODES'? Search: \`WHERE nsql_text LIKE '%LOOKUP_CHARGE_CODES%'\`
-   - **DO NOT** try to join tables unless you're 100% sure of column names
+1. **NEVER WRITE SQL.** 
+   - Do NOT use INSERT, UPDATE, or DELETE
+   - The server will BLOCK you with error message
+   - SQL is READ-ONLY for finding IDs and verification
 
-2. **FINDING LOOKUP DEFINITIONS:**
-   - Search: \`SELECT * FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%SEARCH_TERM%'\`
+2. **CREATE/UPDATE = REST ONLY.**
+   - You MUST use \`trigger_browser_action\`
+   - This is the ONLY way to modify data
 
-3. **FINDING LOOKUP VALUES:**
-   - Search: \`SELECT * FROM CMN_LOOKUPS_V WITH(NOLOCK) WHERE LOOKUP_TYPE = 'EXACT_TYPE' AND LANGUAGE_CODE = 'en'\`
+3. **READ = SQL.**
+   - Use \`execute_server_sql\` to find IDs and verify data
+   - Use it to search metadata (lookups, NSQL)
 
-4. **FINDING OBJECT TABLES:**
-   - Use \`lookup_object\` first
-   - If fails: \`SELECT code FROM ODF_OBJECTS WITH(NOLOCK) WHERE code LIKE '%SEARCH%'\`
+🚀 **TASK CREATION WORKFLOW (3 Steps):**
 
-5. **CREATING TASKS/RECORDS:**
-   - Use \`trigger_browser_action\`
-   - Always verify afterwards with SQL
+**Step 1: Find Parent ID (SQL)**
+User: "Create task in 'this_projd'"
+You: \`SELECT ID, CODE, NAME FROM INV_INVESTMENTS WITH(NOLOCK) WHERE NAME LIKE '%this_projd%' OR CODE LIKE '%this_projd%'\`
+Result: ID = 5004001
 
-⚠️ **CRITICAL RULES:**
-- ALWAYS use \`WITH(NOLOCK)\`
-- ALWAYS use \`TOP 100\` to limit results  
-- Use LIKE search for flexible matching
-- Never give up after one failed tool
-- Verify all creations with SELECT query`;
+**Step 2: Create via REST (Browser)**
+You: \`trigger_browser_action('POST', '/projects/5004001/tasks', { name: 'Maya' })\`
+Note: System auto-fills dates/codes/status if missing
+
+**Step 3: Verify Creation (SQL)**
+You: \`SELECT TOP 5 ID, PRNAME, PRCODE FROM PRTASK WITH(NOLOCK) WHERE PRPROJECTID = 5004001 ORDER BY PRCREATED_DATE DESC\`
+If found → Success! Report to user.
+
+🔍 **SEARCHING METADATA:**
+- Lookups/NSQL: \`SELECT * FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE nsql_text LIKE '%KEYWORD%'\`
+- Lookup Types: \`SELECT * FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%KEYWORD%'\`
+- Use LIKE search, not JOIN (columns vary by version)
+
+⚠️ **CRITICAL:**
+- ALWAYS use \`WITH(NOLOCK)\` in SELECT
+- ALWAYS use \`TOP 100\` to limit results
+- If you get SECURITY BLOCK error → use trigger_browser_action instead
+- Never give up after one failed tool`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'execute_server_sql',
-        description: 'Run SQL query. Best tool for searching NSQL, Lookups, and verification.',
+        description: 'READ-ONLY SQL. Used to find IDs, search Metadata (Lookups/NSQL), and Verify creation. CANNOT write data.',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -276,7 +312,7 @@ STATUS: ${dbStatus}
       type: 'function',
       function: {
         name: 'lookup_object',
-        description: 'Check table names for standard objects.',
+        description: 'Get table name for standard object codes.',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -304,7 +340,7 @@ STATUS: ${dbStatus}
       type: 'function',
       function: {
         name: 'trigger_browser_action',
-        description: 'Send Create/Update command to browser.',
+        description: 'REST API. The ONLY way to Create/Update/Delete data in Clarity.',
         parameters: {
           type: 'object',
           properties: {
@@ -443,16 +479,16 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v17.3-search-engine',
+    version: 'v17.4-strict-rest-enforcer',
     database: dbConnected ? 'online' : 'offline',
     mode: dbConnected ? 'smart-mode' : 'remote-control-mode',
     objects: clarityObjects.size,
     features: [
-      'like-search',
-      'nsql-finder',
+      'strict-rest-enforcement',
+      'sql-write-firewall',
       'auto-task-fields',
       'multi-step-reasoning',
-      'smart-search-engine'
+      'like-search'
     ]
   });
 });
@@ -485,10 +521,10 @@ app.post('/api/chat', async (req, res) => {
 app.listen(PORT, HOST, async () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v17.3 SEARCH ENGINE`);
+  console.log(`🚀 CLARITY MCP v17.4 STRICT REST ENFORCER`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`🔍 Features: LIKE Search, Smart NSQL Finder, Auto Fields`);
+  console.log(`🛡️ Features: REST-Only, SQL Firewall, Auto Defaults`);
   console.log('==========================================================');
   console.log('');
   
@@ -500,6 +536,7 @@ app.listen(PORT, HOST, async () => {
   console.log(`✅ Server Ready`);
   console.log(`📊 DB: ${dbConnected ? 'ONLINE' : 'OFFLINE'}`);
   console.log(`🗺️ Objects: ${clarityObjects.size}`);
+  console.log(`🛡️ SQL: READ-ONLY (Writes blocked)`);
   console.log('==========================================================');
   console.log('');
 });
