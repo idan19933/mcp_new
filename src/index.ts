@@ -8,7 +8,7 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v17.7 - HEADER HUNTER (UI Mimic Edition)");
+console.log("🚀 CLARITY MCP v18.0 - GEL MIMIC (Minimal Payload)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -181,58 +181,48 @@ async function triggerBrowserAction(
   body: any, 
   sendUpdate: any
 ): Promise<string> {
-  let browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
+  const browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
   
   // 🛡️ CRASH FIX
   if (!body) body = {};
 
-  // 🧪 V17.7 HEADER & PAYLOAD FIXES (Mimic Clarity UI)
-  // We send specific headers to trick Clarity into thinking this is a UI action
-  const headers = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'X-Requested-With': 'XMLHttpRequest' // <--- CRITICAL! UI marker
-  };
+  // 🧪 V18.0 GEL MIMIC PAYLOAD
+  // The GEL script sends ONLY the name. We will mimic that simplicity.
+  // We remove 'code', 'start', 'finish' etc. unless specifically requested by the user.
+  // The API will auto-generate them.
+  const cleanBody: any = {};
 
   if (endpoint.includes('tasks') && method === 'POST') {
+    // ONLY send what the GEL script sends:
+    cleanBody.name = body.name || "New Task";
     
-    // 1. Exact Parameter Match (URL Encoded)
-    if (!browserUrl.includes('tsvParams')) {
-      browserUrl += '?tsvParams=(workEffortUnit%3Dfte)';
-    }
-
-    // 2. Exact Payload Match (Based on successful manual test)
-    if (body.isTask === undefined) body.isTask = true;
-    if (!body.percentComplete) body.percentComplete = "0.0";
-    if (!body.duration) body.duration = "1.0";
-    if (!body.status) body.status = "0"; // "0" = Not Started
-    
-    // Fake internal ID helps satisfy UI logic sometimes
-    if (!body._internalId) body._internalId = `__newlyAdded_${Date.now()}`; 
-    
-    if (!body.name) body.name = "New Task";
-    
-    // Defaults for mandatory fields
-    if (!body.start) body.start = new Date().toISOString();
-    if (!body.finish) {
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      body.finish = tomorrow.toISOString();
-    }
+    // Optional: Add code if user asked for it, otherwise let system generate
+    if (body.code) cleanBody.code = body.code;
+  } else {
+    // For other objects, keep the body as is
+    Object.assign(cleanBody, body);
   }
   
   console.log(`[Browser-CMD] ${method} ${browserUrl}`);
-  console.log(`[Browser-Headers]`, JSON.stringify(headers, null, 2));
-  console.log(`[Browser-Body]`, JSON.stringify(body, null, 2));
+  console.log(`[Browser-Body]`, JSON.stringify(cleanBody, null, 2));
+
+  // Headers to look like a legitimate browser request
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest'
+  };
   
   sendUpdate({
     type: 'client_execute',
-    data: { method, url: browserUrl, body, headers }
+    data: { method, url: browserUrl, body: cleanBody, headers }
   });
   
-  return `🚀 REST Command Sent (UI Mimic): ${method} ${browserUrl}
+  return `🚀 REST Command Sent (GEL Mimic): ${method} ${browserUrl}
 
-👉 Added 'X-Requested-With' header & 'isTask:true'. Now verify with SQL.`;
+📦 Payload: ${JSON.stringify(cleanBody)}
+
+👉 Now checking database for confirmation...`;
 }
 
 // ============================================================================
@@ -248,7 +238,7 @@ async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => vo
 
   const dbStatus = dbConnected ? '✅ DB ONLINE' : '⚠️ DB OFFLINE';
 
-  const systemPrompt = `You are **Clarity Master** - A strict REST-only assistant.
+  const systemPrompt = `You are **Clarity Master** - A minimalist REST assistant inspired by GEL scripts.
 
 STATUS: ${dbStatus}
 
@@ -257,29 +247,35 @@ STATUS: ${dbStatus}
 2. **CREATE/UPDATE = REST.** Use \`trigger_browser_action\`
 3. **READ = SQL.** Use \`execute_server_sql\`
 
-🚀 **TASK CREATION WORKFLOW (3 Steps):**
+🚀 **TASK CREATION WORKFLOW (GEL Style):**
 
 **Step 1: Find Parent ID (SQL)**
 \`SELECT ID, CODE FROM INV_INVESTMENTS WITH(NOLOCK) WHERE CODE LIKE '%project_code%'\`
 → Result: ID = 5004001
 
-**Step 2: Create (REST)**
+**Step 2: Create (REST) - MINIMAL PAYLOAD!**
 \`trigger_browser_action('POST', '/projects/5004001/tasks', { name: 'Task Name' })\`
-→ System adds: isTask:true, duration:"1.0", X-Requested-With header
+→ **CRITICAL:** Only send \`name\` field! No start, finish, status, code, etc.
+→ System will auto-generate all other fields like GEL script does
 
 **Step 3: Verify Creation (SQL)**
 \`SELECT TOP 1 PRID, PRNAME, PRCREATED_DATE FROM PRTASK WITH(NOLOCK) WHERE PRPROJECTID = 5004001 ORDER BY PRID DESC\`
 → If PRNAME matches → Success!
 
-🧠 **SEARCHING METADATA:**
+🧠 **CRITICAL PAYLOAD RULES:**
+- For tasks: Send ONLY \`{ name: "..." }\`
+- Do NOT send: start, finish, status, duration, percentComplete, isTask
+- Let the system auto-generate everything else
+- This matches exactly how GEL scripts work
+
+🔍 **SEARCHING METADATA:**
 - Lookups/NSQL: \`SELECT * FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE nsql_text LIKE '%KEYWORD%'\`
 - Use LIKE search, not JOIN
 
-⚠️ **CRITICAL:**
+⚠️ **IMPORTANT:**
 - ALWAYS use \`WITH(NOLOCK)\` in SELECT
-- ALWAYS use \`TOP 100\` to limit results  
-- ALWAYS verify ORDER BY PRID DESC (not by date!)
-- If blocked → use trigger_browser_action`;
+- ALWAYS use \`TOP 100\` to limit results
+- ALWAYS verify ORDER BY PRID DESC (not by date!)`;
 
   const tools: any[] = [
     {
@@ -328,7 +324,7 @@ STATUS: ${dbStatus}
       type: 'function',
       function: {
         name: 'trigger_browser_action',
-        description: 'REST API. The ONLY way to Create/Update/Delete data. Automatically adds UI headers.',
+        description: 'REST API. The ONLY way to Create/Update data. Automatically strips unnecessary fields to match GEL script behavior.',
         parameters: {
           type: 'object',
           properties: {
@@ -467,15 +463,14 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v17.7-header-hunter',
+    version: 'v18.0-gel-mimic',
     database: dbConnected ? 'online' : 'offline',
     mode: dbConnected ? 'smart-mode' : 'remote-control-mode',
     objects: clarityObjects.size,
     features: [
-      'ui-mimic-headers',
-      'x-requested-with',
-      'exact-payload-match',
-      'tsvParams',
+      'minimal-payload',
+      'gel-script-mimic',
+      'auto-field-generation',
       'null-safety',
       'strict-rest-enforcement',
       'sql-firewall'
@@ -511,10 +506,10 @@ app.post('/api/chat', async (req, res) => {
 app.listen(PORT, HOST, async () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v17.7 HEADER HUNTER`);
+  console.log(`🚀 CLARITY MCP v18.0 GEL MIMIC`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`🎯 Features: UI Mimic, X-Requested-With, Exact Payload`);
+  console.log(`📦 Payload: Minimal (name only - like GEL scripts)`);
   console.log('==========================================================');
   console.log('');
   
