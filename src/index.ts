@@ -8,7 +8,7 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v17.4 - STRICT REST ENFORCER");
+console.log("🚀 CLARITY MCP v17.5 - BUG FREE (Null Safety Fix)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -193,10 +193,16 @@ async function triggerBrowserAction(
 ): Promise<string> {
   const browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
   
+  // 🛡️ CRASH FIX: Ensure body exists
+  if (!body) body = {};
+  
   // 🧠 SMART DEFAULTS FOR TASKS
   if (endpoint.includes('tasks') && method === 'POST') {
     if (!body.code) {
       body.code = `TASK_${Date.now().toString().slice(-6)}`; // Auto Code
+    }
+    if (!body.name) {
+      body.name = "New Task"; // Default name if missing
     }
     if (!body.start) {
       body.start = new Date().toISOString();
@@ -479,11 +485,12 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v17.4-strict-rest-enforcer',
+    version: 'v17.5-bug-free',
     database: dbConnected ? 'online' : 'offline',
     mode: dbConnected ? 'smart-mode' : 'remote-control-mode',
     objects: clarityObjects.size,
     features: [
+      'null-safety',
       'strict-rest-enforcement',
       'sql-write-firewall',
       'auto-task-fields',
@@ -521,10 +528,10 @@ app.post('/api/chat', async (req, res) => {
 app.listen(PORT, HOST, async () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v17.4 STRICT REST ENFORCER`);
+  console.log(`🚀 CLARITY MCP v17.5 BUG FREE`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`🛡️ Features: REST-Only, SQL Firewall, Auto Defaults`);
+  console.log(`🛡️ Features: Null Safety, REST-Only, SQL Firewall`);
   console.log('==========================================================');
   console.log('');
   
