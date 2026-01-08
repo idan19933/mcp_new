@@ -8,7 +8,7 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v17.5 - BUG FREE (Null Safety Fix)");
+console.log("🚀 CLARITY MCP v17.7 - HEADER HUNTER (UI Mimic Edition)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -101,7 +101,7 @@ async function loadClarityObjects() {
 }
 
 // ============================================================================
-// TOOLS (The Enforcer)
+// TOOLS
 // ============================================================================
 async function executeServerSQL(sqlQuery: string): Promise<string> {
   if (!dbConnected) {
@@ -111,21 +111,11 @@ async function executeServerSQL(sqlQuery: string): Promise<string> {
     }
   }
   
-  // 🛑 FIREWALL: STRICTLY BLOCK WRITES 🛑
   const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE'];
   const upperSQL = sqlQuery.toUpperCase();
   
   if (forbidden.some(w => upperSQL.includes(` ${w} `) || upperSQL.includes(`\n${w} `) || upperSQL.startsWith(w))) {
-    return `⛔ STRICT SECURITY BLOCK:
-
-You tried to run: "${sqlQuery.substring(0, 100)}..."
-
-Writing to Clarity via SQL is FORBIDDEN because it corrupts the database (missing IDs, auditing, slices).
-
-👉 YOU MUST USE 'trigger_browser_action' (REST API) TO CREATE OR UPDATE DATA.
-
-Example:
-trigger_browser_action('POST', '/projects/5004001/tasks', { name: 'Task Name' })`;
+    return `⛔ STRICT SECURITY BLOCK: Use 'trigger_browser_action' for writes.`;
   }
 
   try {
@@ -191,58 +181,62 @@ async function triggerBrowserAction(
   body: any, 
   sendUpdate: any
 ): Promise<string> {
-  const browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
+  let browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
   
-  // 🛡️ CRASH FIX: Ensure body exists
+  // 🛡️ CRASH FIX
   if (!body) body = {};
-  
-  // 🧠 SMART DEFAULTS FOR TASKS
+
+  // 🧪 V17.7 HEADER & PAYLOAD FIXES (Mimic Clarity UI)
+  // We send specific headers to trick Clarity into thinking this is a UI action
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest' // <--- CRITICAL! UI marker
+  };
+
   if (endpoint.includes('tasks') && method === 'POST') {
-    if (!body.code) {
-      body.code = `TASK_${Date.now().toString().slice(-6)}`; // Auto Code
+    
+    // 1. Exact Parameter Match (URL Encoded)
+    if (!browserUrl.includes('tsvParams')) {
+      browserUrl += '?tsvParams=(workEffortUnit%3Dfte)';
     }
-    if (!body.name) {
-      body.name = "New Task"; // Default name if missing
-    }
-    if (!body.start) {
-      body.start = new Date().toISOString();
-    }
+
+    // 2. Exact Payload Match (Based on successful manual test)
+    if (body.isTask === undefined) body.isTask = true;
+    if (!body.percentComplete) body.percentComplete = "0.0";
+    if (!body.duration) body.duration = "1.0";
+    if (!body.status) body.status = "0"; // "0" = Not Started
+    
+    // Fake internal ID helps satisfy UI logic sometimes
+    if (!body._internalId) body._internalId = `__newlyAdded_${Date.now()}`; 
+    
+    if (!body.name) body.name = "New Task";
+    
+    // Defaults for mandatory fields
+    if (!body.start) body.start = new Date().toISOString();
     if (!body.finish) {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       body.finish = tomorrow.toISOString();
     }
-    if (!body.status) {
-      body.status = '0'; // '0' = Not Started
-    }
-    if (!body.priority) {
-      body.priority = 10;
-    }
-    if (!body.isOpenForTimeEntry) {
-      body.isOpenForTimeEntry = true;
-    }
   }
   
   console.log(`[Browser-CMD] ${method} ${browserUrl}`);
+  console.log(`[Browser-Headers]`, JSON.stringify(headers, null, 2));
   console.log(`[Browser-Body]`, JSON.stringify(body, null, 2));
   
   sendUpdate({
     type: 'client_execute',
-    data: { 
-      method, 
-      url: browserUrl, 
-      body, 
-      headers: { 'Content-Type': 'application/json' } 
-    }
+    data: { method, url: browserUrl, body, headers }
   });
   
-  return `🚀 REST Command Sent: ${method} ${browserUrl}
+  return `🚀 REST Command Sent (UI Mimic): ${method} ${browserUrl}
 
-👉 Now checking database for confirmation...`;
+👉 Added 'X-Requested-With' header & 'isTask:true'. Now verify with SQL.`;
 }
 
 // ============================================================================
-// AI AGENT LOOP (Strict REST Enforcer)
+// AI AGENT LOOP
 // ============================================================================
 async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => void) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
@@ -258,53 +252,41 @@ async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => vo
 
 STATUS: ${dbStatus}
 
-🛡️ **THE LAW (ABSOLUTE RULES):**
-
-1. **NEVER WRITE SQL.** 
-   - Do NOT use INSERT, UPDATE, or DELETE
-   - The server will BLOCK you with error message
-   - SQL is READ-ONLY for finding IDs and verification
-
-2. **CREATE/UPDATE = REST ONLY.**
-   - You MUST use \`trigger_browser_action\`
-   - This is the ONLY way to modify data
-
-3. **READ = SQL.**
-   - Use \`execute_server_sql\` to find IDs and verify data
-   - Use it to search metadata (lookups, NSQL)
+🛡️ **THE LAW:**
+1. **NEVER WRITE SQL.** Do NOT use INSERT, UPDATE, or DELETE
+2. **CREATE/UPDATE = REST.** Use \`trigger_browser_action\`
+3. **READ = SQL.** Use \`execute_server_sql\`
 
 🚀 **TASK CREATION WORKFLOW (3 Steps):**
 
 **Step 1: Find Parent ID (SQL)**
-User: "Create task in 'this_projd'"
-You: \`SELECT ID, CODE, NAME FROM INV_INVESTMENTS WITH(NOLOCK) WHERE NAME LIKE '%this_projd%' OR CODE LIKE '%this_projd%'\`
-Result: ID = 5004001
+\`SELECT ID, CODE FROM INV_INVESTMENTS WITH(NOLOCK) WHERE CODE LIKE '%project_code%'\`
+→ Result: ID = 5004001
 
-**Step 2: Create via REST (Browser)**
-You: \`trigger_browser_action('POST', '/projects/5004001/tasks', { name: 'Maya' })\`
-Note: System auto-fills dates/codes/status if missing
+**Step 2: Create (REST)**
+\`trigger_browser_action('POST', '/projects/5004001/tasks', { name: 'Task Name' })\`
+→ System adds: isTask:true, duration:"1.0", X-Requested-With header
 
 **Step 3: Verify Creation (SQL)**
-You: \`SELECT TOP 5 ID, PRNAME, PRCODE FROM PRTASK WITH(NOLOCK) WHERE PRPROJECTID = 5004001 ORDER BY PRCREATED_DATE DESC\`
-If found → Success! Report to user.
+\`SELECT TOP 1 PRID, PRNAME, PRCREATED_DATE FROM PRTASK WITH(NOLOCK) WHERE PRPROJECTID = 5004001 ORDER BY PRID DESC\`
+→ If PRNAME matches → Success!
 
-🔍 **SEARCHING METADATA:**
+🧠 **SEARCHING METADATA:**
 - Lookups/NSQL: \`SELECT * FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE nsql_text LIKE '%KEYWORD%'\`
-- Lookup Types: \`SELECT * FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%KEYWORD%'\`
-- Use LIKE search, not JOIN (columns vary by version)
+- Use LIKE search, not JOIN
 
 ⚠️ **CRITICAL:**
 - ALWAYS use \`WITH(NOLOCK)\` in SELECT
-- ALWAYS use \`TOP 100\` to limit results
-- If you get SECURITY BLOCK error → use trigger_browser_action instead
-- Never give up after one failed tool`;
+- ALWAYS use \`TOP 100\` to limit results  
+- ALWAYS verify ORDER BY PRID DESC (not by date!)
+- If blocked → use trigger_browser_action`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'execute_server_sql',
-        description: 'READ-ONLY SQL. Used to find IDs, search Metadata (Lookups/NSQL), and Verify creation. CANNOT write data.',
+        description: 'READ-ONLY SQL. Used to find IDs and verify creation.',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -346,7 +328,7 @@ If found → Success! Report to user.
       type: 'function',
       function: {
         name: 'trigger_browser_action',
-        description: 'REST API. The ONLY way to Create/Update/Delete data in Clarity.',
+        description: 'REST API. The ONLY way to Create/Update/Delete data. Automatically adds UI headers.',
         parameters: {
           type: 'object',
           properties: {
@@ -485,17 +467,18 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v17.5-bug-free',
+    version: 'v17.7-header-hunter',
     database: dbConnected ? 'online' : 'offline',
     mode: dbConnected ? 'smart-mode' : 'remote-control-mode',
     objects: clarityObjects.size,
     features: [
+      'ui-mimic-headers',
+      'x-requested-with',
+      'exact-payload-match',
+      'tsvParams',
       'null-safety',
       'strict-rest-enforcement',
-      'sql-write-firewall',
-      'auto-task-fields',
-      'multi-step-reasoning',
-      'like-search'
+      'sql-firewall'
     ]
   });
 });
@@ -528,10 +511,10 @@ app.post('/api/chat', async (req, res) => {
 app.listen(PORT, HOST, async () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v17.5 BUG FREE`);
+  console.log(`🚀 CLARITY MCP v17.7 HEADER HUNTER`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`🛡️ Features: Null Safety, REST-Only, SQL Firewall`);
+  console.log(`🎯 Features: UI Mimic, X-Requested-With, Exact Payload`);
   console.log('==========================================================');
   console.log('');
   
