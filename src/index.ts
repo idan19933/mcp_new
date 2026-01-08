@@ -8,7 +8,7 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v18.0 - GEL MIMIC (Minimal Payload)");
+console.log("🚀 CLARITY MCP v18.0 - READ-ONLY (Queries Only)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -101,21 +101,21 @@ async function loadClarityObjects() {
 }
 
 // ============================================================================
-// TOOLS
+// TOOLS - READ-ONLY
 // ============================================================================
 async function executeServerSQL(sqlQuery: string): Promise<string> {
   if (!dbConnected) {
     await getPool();
     if (!dbConnected) {
-      return '⚠️ DB Offline. Cannot verify data.';
+      return '⚠️ DB Offline. Cannot query data.';
     }
   }
   
-  const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE'];
+  const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE', 'CREATE'];
   const upperSQL = sqlQuery.toUpperCase();
   
   if (forbidden.some(w => upperSQL.includes(` ${w} `) || upperSQL.includes(`\n${w} `) || upperSQL.startsWith(w))) {
-    return `⛔ STRICT SECURITY BLOCK: Use 'trigger_browser_action' for writes.`;
+    return `⛔ SECURITY BLOCK: This is a READ-ONLY system. Only SELECT queries allowed.`;
   }
 
   try {
@@ -153,10 +153,10 @@ async function investigateTable(tableName: string): Promise<string> {
       return `Table '${tableName}' not found.`;
     }
     
-    const colList = cols.recordset.map((c: any) => c.COLUMN_NAME).slice(0, 20);
+    const colList = cols.recordset.map((c: any) => c.COLUMN_NAME).slice(0, 30);
     
     return `✅ Table: ${tableName} (${cols.recordset.length} columns)
-Cols: ${colList.join(', ')}${cols.recordset.length > 20 ? '...' : ''}`;
+Columns: ${colList.join(', ')}${cols.recordset.length > 30 ? '...' : ''}`;
     
   } catch (e: any) { 
     return `Investigation failed: ${e.message}`; 
@@ -168,65 +168,15 @@ async function lookupObject(objectCode: string): Promise<string> {
   const obj = clarityObjects.get(code);
   
   if (!obj) {
-    return `❌ Object '${objectCode}' not found.`;
+    return `❌ Object '${objectCode}' not found. Try: execute_server_sql("SELECT CODE FROM ODF_OBJECTS WITH(NOLOCK) WHERE CODE LIKE '%${objectCode}%'")`;
   }
   
   return `✅ Object: ${obj.code}
 Table: ${obj.table}`;
 }
 
-async function triggerBrowserAction(
-  method: string, 
-  endpoint: string, 
-  body: any, 
-  sendUpdate: any
-): Promise<string> {
-  const browserUrl = `/ppm/rest/v1${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
-  
-  // 🛡️ CRASH FIX
-  if (!body) body = {};
-
-  // 🧪 V18.0 GEL MIMIC PAYLOAD
-  // The GEL script sends ONLY the name. We will mimic that simplicity.
-  // We remove 'code', 'start', 'finish' etc. unless specifically requested by the user.
-  // The API will auto-generate them.
-  const cleanBody: any = {};
-
-  if (endpoint.includes('tasks') && method === 'POST') {
-    // ONLY send what the GEL script sends:
-    cleanBody.name = body.name || "New Task";
-    
-    // Optional: Add code if user asked for it, otherwise let system generate
-    if (body.code) cleanBody.code = body.code;
-  } else {
-    // For other objects, keep the body as is
-    Object.assign(cleanBody, body);
-  }
-  
-  console.log(`[Browser-CMD] ${method} ${browserUrl}`);
-  console.log(`[Browser-Body]`, JSON.stringify(cleanBody, null, 2));
-
-  // Headers to look like a legitimate browser request
-  const headers = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'X-Requested-With': 'XMLHttpRequest'
-  };
-  
-  sendUpdate({
-    type: 'client_execute',
-    data: { method, url: browserUrl, body: cleanBody, headers }
-  });
-  
-  return `🚀 REST Command Sent (GEL Mimic): ${method} ${browserUrl}
-
-📦 Payload: ${JSON.stringify(cleanBody)}
-
-👉 Now checking database for confirmation...`;
-}
-
 // ============================================================================
-// AI AGENT LOOP
+// AI AGENT LOOP - READ-ONLY
 // ============================================================================
 async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => void) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
@@ -238,51 +188,68 @@ async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => vo
 
   const dbStatus = dbConnected ? '✅ DB ONLINE' : '⚠️ DB OFFLINE';
 
-  const systemPrompt = `You are **Clarity Master** - A minimalist REST assistant inspired by GEL scripts.
+  const systemPrompt = `You are **Clarity Master** - A READ-ONLY database assistant.
 
 STATUS: ${dbStatus}
 
-🛡️ **THE LAW:**
-1. **NEVER WRITE SQL.** Do NOT use INSERT, UPDATE, or DELETE
-2. **CREATE/UPDATE = REST.** Use \`trigger_browser_action\`
-3. **READ = SQL.** Use \`execute_server_sql\`
+🎯 **YOUR PURPOSE:**
+- Answer questions about Clarity data
+- Find information in the database
+- Analyze data and provide insights
+- Search for projects, tasks, resources, etc.
 
-🚀 **TASK CREATION WORKFLOW (GEL Style):**
+🔍 **AVAILABLE TOOLS:**
+1. \`execute_server_sql\` - Run SELECT queries
+2. \`lookup_object\` - Find table names for objects
+3. \`investigate_table\` - See table columns
 
-**Step 1: Find Parent ID (SQL)**
-\`SELECT ID, CODE FROM INV_INVESTMENTS WITH(NOLOCK) WHERE CODE LIKE '%project_code%'\`
-→ Result: ID = 5004001
-
-**Step 2: Create (REST) - MINIMAL PAYLOAD!**
-\`trigger_browser_action('POST', '/projects/5004001/tasks', { name: 'Task Name' })\`
-→ **CRITICAL:** Only send \`name\` field! No start, finish, status, code, etc.
-→ System will auto-generate all other fields like GEL script does
-
-**Step 3: Verify Creation (SQL)**
-\`SELECT TOP 1 PRID, PRNAME, PRCREATED_DATE FROM PRTASK WITH(NOLOCK) WHERE PRPROJECTID = 5004001 ORDER BY PRID DESC\`
-→ If PRNAME matches → Success!
-
-🧠 **CRITICAL PAYLOAD RULES:**
-- For tasks: Send ONLY \`{ name: "..." }\`
-- Do NOT send: start, finish, status, duration, percentComplete, isTask
-- Let the system auto-generate everything else
-- This matches exactly how GEL scripts work
-
-🔍 **SEARCHING METADATA:**
-- Lookups/NSQL: \`SELECT * FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE nsql_text LIKE '%KEYWORD%'\`
-- Use LIKE search, not JOIN
-
-⚠️ **IMPORTANT:**
-- ALWAYS use \`WITH(NOLOCK)\` in SELECT
+⚠️ **CRITICAL RULES:**
+- This is READ-ONLY! You can only SELECT data, not modify it
+- ALWAYS use \`WITH(NOLOCK)\` in SELECT queries
 - ALWAYS use \`TOP 100\` to limit results
-- ALWAYS verify ORDER BY PRID DESC (not by date!)`;
+- Use LIKE for flexible searching: \`WHERE NAME LIKE '%search%'\`
+
+📊 **COMMON QUERIES:**
+
+**Find Projects:**
+\`SELECT TOP 10 ID, CODE, NAME FROM INV_INVESTMENTS WITH(NOLOCK) WHERE NAME LIKE '%keyword%'\`
+
+**Count Projects:**
+\`SELECT COUNT(*) as total FROM INV_INVESTMENTS WITH(NOLOCK)\`
+
+**Find Tasks:**
+\`SELECT TOP 10 PRID, PRNAME, PRPROJECTID FROM PRTASK WITH(NOLOCK) WHERE PRNAME LIKE '%keyword%'\`
+
+**Find Lookups:**
+\`SELECT TOP 10 LOOKUP_TYPE, LOOKUP_NAME FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%keyword%'\`
+
+**Search NSQL:**
+\`SELECT TOP 10 QUERY_CODE, NSQL_TEXT FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE NSQL_TEXT LIKE '%keyword%'\`
+
+🧠 **SEARCH STRATEGY:**
+1. If user asks about an object → use \`lookup_object\` first
+2. Then use \`execute_server_sql\` to query the table
+3. For metadata (lookups, queries) → search directly with SQL
+4. Always provide clear, concise answers
+
+💡 **EXAMPLES:**
+
+User: "How many projects?"
+You: \`execute_server_sql("SELECT COUNT(*) as total FROM INV_INVESTMENTS WITH(NOLOCK)")\`
+
+User: "Find charge code lookup"
+You: \`execute_server_sql("SELECT * FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%CHARGE%'")\`
+
+User: "Show me tasks in project this_proj"
+You: \`execute_server_sql("SELECT p.ID FROM INV_INVESTMENTS p WITH(NOLOCK) WHERE p.CODE LIKE '%this_proj%'")\`
+Then: \`execute_server_sql("SELECT TOP 10 PRID, PRNAME FROM PRTASK WITH(NOLOCK) WHERE PRPROJECTID = [found_id]")\``;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
         name: 'execute_server_sql',
-        description: 'READ-ONLY SQL. Used to find IDs and verify creation.',
+        description: 'Run READ-ONLY SQL queries (SELECT only)',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -296,7 +263,7 @@ STATUS: ${dbStatus}
       type: 'function',
       function: {
         name: 'lookup_object',
-        description: 'Get table name for standard object codes.',
+        description: 'Find table name for a Clarity object code',
         parameters: { 
           type: 'object', 
           properties: { 
@@ -310,32 +277,13 @@ STATUS: ${dbStatus}
       type: 'function',
       function: {
         name: 'investigate_table',
-        description: 'Check columns of a specific table.',
+        description: 'Get column information for a table',
         parameters: { 
           type: 'object', 
           properties: { 
             tableName: { type: 'string' } 
           }, 
           required: ['tableName'] 
-        }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'trigger_browser_action',
-        description: 'REST API. The ONLY way to Create/Update data. Automatically strips unnecessary fields to match GEL script behavior.',
-        parameters: {
-          type: 'object',
-          properties: {
-            method: { 
-              type: 'string', 
-              enum: ['POST', 'PUT', 'DELETE'] 
-            },
-            endpoint: { type: 'string' },
-            body: { type: 'object' }
-          },
-          required: ['method', 'endpoint']
         }
       }
     }
@@ -347,7 +295,7 @@ STATUS: ${dbStatus}
   ];
 
   let iteration = 0;
-  const MAX_ITERATIONS = 12;
+  const MAX_ITERATIONS = 10;
   
   while (iteration < MAX_ITERATIONS) { 
     iteration++;
@@ -403,14 +351,6 @@ STATUS: ${dbStatus}
             else if (fn === 'investigate_table') {
               res = await investigateTable(args.tableName || '');
             }
-            else if (fn === 'trigger_browser_action') {
-              res = await triggerBrowserAction(
-                args.method || 'POST', 
-                args.endpoint || '/', 
-                args.body, 
-                sendUpdate
-              );
-            }
             else {
               res = `Unknown tool: ${fn}`;
             }
@@ -429,10 +369,9 @@ STATUS: ${dbStatus}
           });
         }
         
-        continue; // Next iteration
+        continue;
         
       } else {
-        // Final answer
         sendUpdate({ type: 'complete', data: msg.content });
         return msg.content;
       }
@@ -444,11 +383,11 @@ STATUS: ${dbStatus}
     }
   }
   
-  return 'Investigation complete (max iterations reached)';
+  return 'Search complete (max iterations reached)';
 }
 
 // ============================================================================
-// SERVER SETUP
+// SERVER
 // ============================================================================
 const app = express();
 
@@ -463,17 +402,16 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v18.0-gel-mimic',
+    version: 'v18.0-read-only',
     database: dbConnected ? 'online' : 'offline',
-    mode: dbConnected ? 'smart-mode' : 'remote-control-mode',
+    mode: 'read-only',
     objects: clarityObjects.size,
     features: [
-      'minimal-payload',
-      'gel-script-mimic',
-      'auto-field-generation',
-      'null-safety',
-      'strict-rest-enforcement',
-      'sql-firewall'
+      'sql-queries',
+      'table-investigation',
+      'object-lookup',
+      'read-only-enforced',
+      'multi-step-reasoning'
     ]
   });
 });
@@ -506,10 +444,10 @@ app.post('/api/chat', async (req, res) => {
 app.listen(PORT, HOST, async () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v18.0 GEL MIMIC`);
+  console.log(`🚀 CLARITY MCP v18.0 READ-ONLY`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`📦 Payload: Minimal (name only - like GEL scripts)`);
+  console.log(`📖 Mode: READ-ONLY (Queries Only)`);
   console.log('==========================================================');
   console.log('');
   
@@ -521,7 +459,7 @@ app.listen(PORT, HOST, async () => {
   console.log(`✅ Server Ready`);
   console.log(`📊 DB: ${dbConnected ? 'ONLINE' : 'OFFLINE'}`);
   console.log(`🗺️ Objects: ${clarityObjects.size}`);
-  console.log(`🛡️ SQL: READ-ONLY (Writes blocked)`);
+  console.log(`🔒 Mode: READ-ONLY`);
   console.log('==========================================================');
   console.log('');
 });
