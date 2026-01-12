@@ -10,7 +10,7 @@ console.log("🚀 CLARITY MCP v20.0 - BROWSER EXECUTION (WITH RESPONSE)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const CLARITY_BASE_URL = process.env.CLARITY_BASE_URL || 'http://16.16.83.171';
+const CLARITY_BASE_URL = process.env.CLARITY_BASE_URL || 'http://16.16.83.171/niku/rest/v1';
 
 console.log('🌐 Clarity URL:', CLARITY_BASE_URL);
 console.log('🔑 Auth: Browser session (no token needed)');
@@ -100,19 +100,19 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
   
   switch (name) {
     case 'get_objects':
-      endpoint = '/ppm/rest/v1/describe?filter=((extensions in (\'inv\')))';
+      endpoint = '/niku/rest/v1/describe?filter=((extensions in (\'inv\')))';
       break;
       
     case 'get_object_attributes':
       const { objectName } = parsedArgs;
-      endpoint = `/ppm/rest/v1/describeAttributes?filter=(resourceName='${objectName}')`;
+      endpoint = `/niku/rest/v1/describeAttributes?filter=(resourceName='${objectName}')`;
       break;
       
     case 'query_object':
       const { objectName: obj, fields, filter } = parsedArgs;
       const fieldsParam = fields.join(',');
       const filterParam = filter ? `&filter=${encodeURIComponent(filter)}` : '';
-      endpoint = `/ppm/rest/v1/${obj}?fields=${fieldsParam}${filterParam}`;
+      endpoint = `/niku/rest/v1/${obj}?fields=${fieldsParam}${filterParam}`;
       break;
       
     default:
