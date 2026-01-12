@@ -210,22 +210,47 @@ Provide clear, data-driven answers.`
   while (iterations < maxIterations) {
     iterations++;
     
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o',
-        messages,
-        tools,
-        temperature: 0.7
-      })
-    });
+    let retries = 0;
+    const maxRetries = 3;
+    let response;
     
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.status}`);
+    // Retry loop for rate limits
+    while (retries < maxRetries) {
+      response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          messages,
+          tools,
+          temperature: 0.7
+        })
+      });
+      
+      // Handle rate limit (429)
+      if (response.status === 429) {
+        retries++;
+        const waitTime = Math.pow(2, retries) * 1000; // Exponential backoff: 2s, 4s, 8s
+        console.log(`[Retry ${retries}/${maxRetries}] Rate limited, waiting ${waitTime}ms...`);
+        
+        if (retries < maxRetries) {
+          send({ type: 'thinking', data: `Rate limited, retrying in ${waitTime/1000}s...` });
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
+        } else {
+          throw new Error('Rate limit exceeded. Please wait a moment and try again.');
+        }
+      }
+      
+      // Success or other error - break retry loop
+      break;
+    }
+    
+    if (!response || !response.ok) {
+      throw new Error(`OpenAI API error: ${response?.status || 'unknown'}`);
     }
     
     const data: any = await response.json();
