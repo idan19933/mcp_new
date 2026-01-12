@@ -132,8 +132,15 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
       url: endpoint,
       method: 'GET',
       headers: {
+        'Accept': 'application/json, text/plain, */*',
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'X-Requested-With': 'XMLHttpRequest',
+        'x-api-concrete-object-code': 'false',
+        'x-api-filter-ignore-timestamp': 'true',
+        'x-api-include-auth': 'true',
+        'x-api-include-instance-info': 'true',
+        'x-api-rule-engine': 'ui',
+        'x-api-virtual-rows': 'false'
       }
     }
   });
