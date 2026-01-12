@@ -105,14 +105,25 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
       
     case 'get_object_attributes':
       const { objectName } = parsedArgs;
-      endpoint = `/ppm/rest/v1/describeAttributes?filter=(resourceName=%27${objectName}%27)`;
+      endpoint = `/ppm/rest/v1/describeAttributes?filter=(resourceName+%3D+%27${objectName}%27)`;
       break;
       
     case 'query_object':
       const { objectName: obj, fields, filter } = parsedArgs;
+      
+      // Pluralize common object names
+      const pluralMap: { [key: string]: string } = {
+        'project': 'projects',
+        'task': 'tasks',
+        'resource': 'resources',
+        'idea': 'ideas',
+        'objective': 'objectives'
+      };
+      const objectPath = pluralMap[obj.toLowerCase()] || obj;
+      
       const fieldsParam = fields.join(',');
       const filterParam = filter ? `&filter=${encodeURIComponent(filter)}` : '';
-      endpoint = `/ppm/rest/v1/${obj}?fields=${fieldsParam}${filterParam}`;
+      endpoint = `/ppm/rest/v1/${objectPath}?fields=${fieldsParam}${filterParam}`;
       break;
       
     default:
