@@ -105,7 +105,7 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
       
     case 'get_object_attributes':
       const { objectName } = parsedArgs;
-      endpoint = `/ppm/rest/v1/describeAttributes?filter=(resourceName='${objectName}')`;
+      endpoint = `/ppm/rest/v1/describeAttributes?filter=(resourceName=%27${objectName}%27)`;
       break;
       
     case 'query_object':
