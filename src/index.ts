@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-// @ts-ignore
-import sql from 'mssql';
 import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
@@ -8,310 +6,341 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v18.0 - READ-ONLY (Queries Only)");
+console.log("🚀 CLARITY MCP v19.0 - REST API Edition");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const DB_CONFIG = {
-  user: process.env.DB_USER || 'niku',
-  password: process.env.DB_PASSWORD || 'niku',
-  server: process.env.DB_SERVER || '16.16.83.171',
-  database: process.env.DB_NAME || 'niku',
-  requestTimeout: 60000,
-  options: { encrypt: false, trustServerCertificate: true, enableArithAbort: true },
-  pool: { max: 20, min: 2, idleTimeoutMillis: 30000 }
-};
+const CLARITY_BASE_URL = process.env.CLARITY_BASE_URL || 'http://16.16.83.171/ppm/rest/v1';
 
 // ============================================================================
-// ROBUST CONNECTION
+// CLARITY REST API CLIENT
 // ============================================================================
-let pool: sql.ConnectionPool | null = null;
-let dbConnected = false;
-
-async function getPool() {
-  if (pool?.connected) { dbConnected = true; return pool; }
-  try {
-    console.log('🔌 Connecting to Database...');
-    pool = await new sql.ConnectionPool(DB_CONFIG).connect();
-    console.log('✅ Database Connected Successfully');
-    dbConnected = true;
-    pool.on('error', (err: any) => { console.error('Pool Error:', err); dbConnected = false; });
-    return pool;
-  } catch (err: any) {
-    console.error(`⚠️ Database Connection Failed: ${err.message}`);
-    console.log('⚠️ Server starting in "Resilient Mode"');
-    dbConnected = false;
-    return null;
-  }
+interface ClarityCredentials {
+  authtoken: string;
+  contextId?: string;
 }
 
-// ============================================================================
-// HYBRID OBJECT MAP
-// ============================================================================
-interface ClarityObject { code: string; name: string; table: string; }
-let clarityObjects: Map<string, ClarityObject> = new Map();
+let cachedObjects: any = null;
+let cachedAttributes: Map<string, any> = new Map();
 
-const CORE_MAPPING: Record<string, string> = {
-  'PROJECT': 'INV_INVESTMENTS',
-  'IDEA': 'INV_INVESTMENTS',
-  'TASK': 'PRTASK',
-  'RESOURCE': 'SRM_RESOURCES',
-  'TEAM': 'PRTEAM',
-  'TIMESHEET': 'PRTIMESHEET',
-  'ASSIGNMENT': 'PRASSIGNMENT',
-  'USER': 'CMN_SEC_USERS',
-  'CHANGE': 'CHG_INVESTMENTS',
-  'INCIDENT': 'INC_INCIDENTS',
-  'ISSUE': 'ISS_ISSUES',
-  'RISK': 'RISK_RISKS',
-  'PROCESS': 'BPM_PROCESSES'
-};
-
-async function loadClarityObjects() {
-  console.log('[Objects] Loading core map...');
+async function callClarityAPI(
+  endpoint: string, 
+  credentials: ClarityCredentials,
+  method: 'GET' | 'POST' = 'GET',
+  body?: any
+): Promise<any> {
+  const url = `${CLARITY_BASE_URL}${endpoint}`;
   
-  Object.entries(CORE_MAPPING).forEach(([code, table]) => {
-    clarityObjects.set(code, { code, name: code, table });
-  });
+  const headers: any = {
+    'accept': 'application/json, text/plain, */*',
+    'authtoken': credentials.authtoken,
+  };
   
-  console.log(`✅ Core map: ${clarityObjects.size} objects`);
-
-  if (!dbConnected) {
-    console.log('⚠️ Skipping dynamic loading (DB offline)');
-    return;
+  if (credentials.contextId) {
+    headers['x-api-context-id'] = credentials.contextId;
   }
-
+  
+  if (method === 'POST' && body) {
+    headers['content-type'] = 'application/json';
+  }
+  
+  console.log(`[API] ${method} ${url}`);
+  
+  const options: any = {
+    method,
+    headers,
+  };
+  
+  if (method === 'POST' && body) {
+    options.body = JSON.stringify(body);
+  }
+  
   try {
-    const db = await getPool();
-    if (!db) return;
+    const response = await fetch(url, options);
     
-    const result = await db.request().query("SELECT CODE FROM ODF_OBJECTS");
-    result.recordset.forEach((row: any) => {
-      const code = row.CODE.toUpperCase();
-      const table = CORE_MAPPING[code] || `ODF_CA_${code}`;
-      if (!clarityObjects.has(code)) {
-        clarityObjects.set(code, { code, name: code, table });
-      }
-    });
-    
-    console.log(`✅ Map Loaded: ${clarityObjects.size} objects total`);
-  } catch (e: any) { 
-    console.warn(`⚠️ Dynamic mapping failed (Using core only)`); 
-  }
-}
-
-// ============================================================================
-// TOOLS - READ-ONLY
-// ============================================================================
-async function executeServerSQL(sqlQuery: string): Promise<string> {
-  if (!dbConnected) {
-    await getPool();
-    if (!dbConnected) {
-      return '⚠️ DB Offline. Cannot query data.';
-    }
-  }
-  
-  const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE', 'CREATE'];
-  const upperSQL = sqlQuery.toUpperCase();
-  
-  if (forbidden.some(w => upperSQL.includes(` ${w} `) || upperSQL.includes(`\n${w} `) || upperSQL.startsWith(w))) {
-    return `⛔ SECURITY BLOCK: This is a READ-ONLY system. Only SELECT queries allowed.`;
-  }
-
-  try {
-    const db = await getPool();
-    if (!db) return '❌ DB Offline';
-    
-    console.log(`[SQL] ${sqlQuery}`);
-    const result = await db.request().query(sqlQuery);
-    
-    if (result.recordset.length === 0) {
-      return 'Query executed. No results found.';
+    if (!response.ok) {
+      throw new Error(`API Error: ${response.status} ${response.statusText}`);
     }
     
-    return JSON.stringify(result.recordset.slice(0, 100), null, 2);
-  } catch (e: any) { 
-    return `❌ SQL Error: ${e.message}`; 
+    const data = await response.json();
+    return data;
+  } catch (error: any) {
+    console.error('[API] Error:', error.message);
+    throw error;
   }
 }
 
-async function investigateTable(tableName: string): Promise<string> {
-  if (!dbConnected) return `⚠️ DB Offline.`;
-  
+// ============================================================================
+// TOOLS - REST API BASED
+// ============================================================================
+
+/**
+ * Get all available objects from Clarity
+ */
+async function getObjects(credentials: ClarityCredentials): Promise<string> {
   try {
-    const db = await getPool();
-    if (!db) return 'DB Disconnected';
-    
-    const cols = await db.request().query(`
-      SELECT COLUMN_NAME, DATA_TYPE 
-      FROM INFORMATION_SCHEMA.COLUMNS WITH(NOLOCK)
-      WHERE TABLE_NAME = '${tableName}' 
-      ORDER BY ORDINAL_POSITION
-    `);
-    
-    if (cols.recordset.length === 0) {
-      return `Table '${tableName}' not found.`;
+    if (cachedObjects) {
+      return JSON.stringify(cachedObjects, null, 2);
     }
     
-    const colList = cols.recordset.map((c: any) => c.COLUMN_NAME).slice(0, 30);
+    const data = await callClarityAPI(
+      '/describe?filter=((extensions in (\'inv\')))',
+      credentials
+    );
     
-    return `✅ Table: ${tableName} (${cols.recordset.length} columns)
-Columns: ${colList.join(', ')}${cols.recordset.length > 30 ? '...' : ''}`;
+    cachedObjects = data;
     
-  } catch (e: any) { 
-    return `Investigation failed: ${e.message}`; 
+    const summary = {
+      totalCount: data._totalCount || data._recordsReturned,
+      objects: data._results?.map((obj: any) => ({
+        code: obj.code,
+        name: obj.name,
+        isCustom: obj.isCustom
+      })) || []
+    };
+    
+    return JSON.stringify(summary, null, 2);
+  } catch (error: any) {
+    return `❌ Error getting objects: ${error.message}`;
   }
 }
 
-async function lookupObject(objectCode: string): Promise<string> {
-  const code = objectCode.toUpperCase();
-  const obj = clarityObjects.get(code);
-  
-  if (!obj) {
-    return `❌ Object '${objectCode}' not found. Try: execute_server_sql("SELECT CODE FROM ODF_OBJECTS WITH(NOLOCK) WHERE CODE LIKE '%${objectCode}%'")`;
+/**
+ * Get attributes (fields) for a specific object
+ */
+async function getObjectAttributes(
+  objectName: string, 
+  credentials: ClarityCredentials
+): Promise<string> {
+  try {
+    // Check cache first
+    if (cachedAttributes.has(objectName)) {
+      return JSON.stringify(cachedAttributes.get(objectName), null, 2);
+    }
+    
+    const data = await callClarityAPI(
+      `/describeAttributes?filter=(resourceName = '${objectName}') and (honorFieldLevelSecurity = true)&limit=1500`,
+      credentials
+    );
+    
+    cachedAttributes.set(objectName, data);
+    
+    const summary = {
+      object: objectName,
+      totalCount: data._recordsReturned,
+      attributes: data._results?.map((attr: any) => ({
+        name: attr.name,
+        label: attr.label,
+        dataType: attr.dataType,
+        isRequired: attr.isRequired,
+        isReadOnly: attr.isReadOnly,
+        isCustom: attr.isCustom
+      })) || []
+    };
+    
+    return JSON.stringify(summary, null, 2);
+  } catch (error: any) {
+    return `❌ Error getting attributes: ${error.message}`;
   }
-  
-  return `✅ Object: ${obj.code}
-Table: ${obj.table}`;
+}
+
+/**
+ * Query data from a Clarity object
+ */
+async function queryObject(
+  objectName: string,
+  fields: string[],
+  filter: string | null,
+  credentials: ClarityCredentials
+): Promise<string> {
+  try {
+    let endpoint = `/${objectName}`;
+    const params: string[] = [];
+    
+    if (fields && fields.length > 0) {
+      params.push(`fields=${fields.join(',')}`);
+    }
+    
+    if (filter) {
+      params.push(`filter=${encodeURIComponent(filter)}`);
+    }
+    
+    params.push('limit=100');
+    
+    if (params.length > 0) {
+      endpoint += '?' + params.join('&');
+    }
+    
+    const data = await callClarityAPI(endpoint, credentials);
+    
+    return JSON.stringify(data, null, 2);
+  } catch (error: any) {
+    return `❌ Error querying object: ${error.message}`;
+  }
+}
+
+/**
+ * Get a single record by ID
+ */
+async function getRecord(
+  objectName: string,
+  recordId: string,
+  credentials: ClarityCredentials
+): Promise<string> {
+  try {
+    const endpoint = `/${objectName}/${recordId}`;
+    const data = await callClarityAPI(endpoint, credentials);
+    return JSON.stringify(data, null, 2);
+  } catch (error: any) {
+    return `❌ Error getting record: ${error.message}`;
+  }
 }
 
 // ============================================================================
-// AI AGENT LOOP - READ-ONLY
+// AI AGENT LOOP
 // ============================================================================
-async function runAIAgentLoop(userMessage: string, sendUpdate: (data: any) => void) {
+async function runAIAgentLoop(
+  userMessage: string, 
+  credentials: ClarityCredentials,
+  sendUpdate: (data: any) => void
+) {
   if (!OPENAI_API_KEY) return 'OpenAI API Key Missing';
-  
-  if (clarityObjects.size === 0) { 
-    await getPool(); 
-    await loadClarityObjects(); 
-  }
 
-  const dbStatus = dbConnected ? '✅ DB ONLINE' : '⚠️ DB OFFLINE';
-
-  const systemPrompt = `You are **Clarity Master** - A READ-ONLY database assistant.
-
-STATUS: ${dbStatus}
+  const systemPrompt = `You are **Clarity REST API Assistant** - An expert in Clarity PPM REST API.
 
 🎯 **YOUR PURPOSE:**
-- Answer questions about Clarity data
-- Find information in the database
-- Analyze data and provide insights
-- Search for projects, tasks, resources, etc.
+- Help users query Clarity data via REST API
+- Guide users through the API structure
+- Build proper API queries
 
 🔍 **AVAILABLE TOOLS:**
-1. \`execute_server_sql\` - Run SELECT queries
-2. \`lookup_object\` - Find table names for objects
-3. \`investigate_table\` - See table columns
+1. \`get_objects\` - List all available Clarity objects
+2. \`get_object_attributes\` - Get fields/columns for an object
+3. \`query_object\` - Query data from an object
+4. \`get_record\` - Get a specific record by ID
 
-⚠️ **CRITICAL RULES:**
-- This is READ-ONLY! You can only SELECT data, not modify it
-- ALWAYS use \`WITH(NOLOCK)\` in SELECT queries
-- ALWAYS use \`TOP 100\` to limit results
-- Use LIKE for flexible searching: \`WHERE NAME LIKE '%search%'\`
+📊 **WORKFLOW:**
+1. First, use \`get_objects\` to see available objects
+2. Then, use \`get_object_attributes\` to see what fields exist
+3. Finally, use \`query_object\` to get the actual data
 
-📊 **COMMON QUERIES:**
-
-**Find Projects:**
-\`SELECT TOP 10 ID, CODE, NAME FROM INV_INVESTMENTS WITH(NOLOCK) WHERE NAME LIKE '%keyword%'\`
-
-**Count Projects:**
-\`SELECT COUNT(*) as total FROM INV_INVESTMENTS WITH(NOLOCK)\`
-
-**Find Tasks:**
-\`SELECT TOP 10 PRID, PRNAME, PRPROJECTID FROM PRTASK WITH(NOLOCK) WHERE PRNAME LIKE '%keyword%'\`
-
-**Find Lookups:**
-\`SELECT TOP 10 LOOKUP_TYPE, LOOKUP_NAME FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%keyword%'\`
-
-**Search NSQL:**
-\`SELECT TOP 10 QUERY_CODE, NSQL_TEXT FROM CMN_NSQL_QUERIES WITH(NOLOCK) WHERE NSQL_TEXT LIKE '%keyword%'\`
-
-🧠 **SEARCH STRATEGY:**
-1. If user asks about an object → use \`lookup_object\` first
-2. Then use \`execute_server_sql\` to query the table
-3. For metadata (lookups, queries) → search directly with SQL
-4. Always provide clear, concise answers
+🔎 **FILTERS:**
+- Use Clarity filter syntax: \`(field = 'value')\`
+- Multiple conditions: \`(field1 = 'value1') and (field2 = 'value2')\`
+- LIKE search: \`(name like '%search%')\`
 
 💡 **EXAMPLES:**
 
-User: "How many projects?"
-You: \`execute_server_sql("SELECT COUNT(*) as total FROM INV_INVESTMENTS WITH(NOLOCK)")\`
+User: "What objects are available?"
+You: \`get_objects()\`
 
-User: "Find charge code lookup"
-You: \`execute_server_sql("SELECT * FROM CMN_LOOKUP_TYPES WITH(NOLOCK) WHERE LOOKUP_TYPE LIKE '%CHARGE%'")\`
+User: "What fields does the projects object have?"
+You: \`get_object_attributes('projects')\`
 
-User: "Show me tasks in project this_proj"
-You: \`execute_server_sql("SELECT p.ID FROM INV_INVESTMENTS p WITH(NOLOCK) WHERE p.CODE LIKE '%this_proj%'")\`
-Then: \`execute_server_sql("SELECT TOP 10 PRID, PRNAME FROM PRTASK WITH(NOLOCK) WHERE PRPROJECTID = [found_id]")\``;
+User: "Find all active projects"
+You: \`query_object('projects', ['name', 'code', 'status'], '(isActive = true)')\`
+
+User: "Find project with code PRJ001"
+You: \`query_object('projects', ['name', 'code', 'manager'], '(code = \\'PRJ001\\')')\`
+
+⚠️ **IMPORTANT:**
+- ALWAYS start with \`get_objects\` if you don't know the object name
+- ALWAYS use \`get_object_attributes\` before querying to know field names
+- Use proper Clarity field names (like 'name', 'code', 'isActive')
+- Filters must use Clarity syntax with parentheses`;
 
   const tools: any[] = [
     {
       type: 'function',
       function: {
-        name: 'execute_server_sql',
-        description: 'Run READ-ONLY SQL queries (SELECT only)',
-        parameters: { 
-          type: 'object', 
-          properties: { 
-            sqlQuery: { type: 'string' } 
-          }, 
-          required: ['sqlQuery'] 
+        name: 'get_objects',
+        description: 'Get list of all available Clarity objects',
+        parameters: { type: 'object', properties: {} }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'get_object_attributes',
+        description: 'Get attributes (fields) for a specific Clarity object',
+        parameters: {
+          type: 'object',
+          properties: {
+            objectName: {
+              type: 'string',
+              description: 'Name of the object (e.g., "projects", "tasks")'
+            }
+          },
+          required: ['objectName']
         }
       }
     },
     {
       type: 'function',
       function: {
-        name: 'lookup_object',
-        description: 'Find table name for a Clarity object code',
-        parameters: { 
-          type: 'object', 
-          properties: { 
-            objectCode: { type: 'string' } 
-          }, 
-          required: ['objectCode'] 
+        name: 'query_object',
+        description: 'Query data from a Clarity object',
+        parameters: {
+          type: 'object',
+          properties: {
+            objectName: {
+              type: 'string',
+              description: 'Name of the object to query'
+            },
+            fields: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Fields to retrieve'
+            },
+            filter: {
+              type: 'string',
+              description: 'Clarity filter syntax, e.g., "(name like \'%test%\')"'
+            }
+          },
+          required: ['objectName']
         }
       }
     },
     {
       type: 'function',
       function: {
-        name: 'investigate_table',
-        description: 'Get column information for a table',
-        parameters: { 
-          type: 'object', 
-          properties: { 
-            tableName: { type: 'string' } 
-          }, 
-          required: ['tableName'] 
+        name: 'get_record',
+        description: 'Get a specific record by ID',
+        parameters: {
+          type: 'object',
+          properties: {
+            objectName: { type: 'string' },
+            recordId: { type: 'string' }
+          },
+          required: ['objectName', 'recordId']
         }
       }
     }
   ];
 
   let messages: any[] = [
-    { role: 'system', content: systemPrompt }, 
+    { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage }
   ];
 
   let iteration = 0;
   const MAX_ITERATIONS = 10;
-  
-  while (iteration < MAX_ITERATIONS) { 
+
+  while (iteration < MAX_ITERATIONS) {
     iteration++;
-    sendUpdate({ type: 'thinking', data: `Reasoning... (${iteration}/${MAX_ITERATIONS})` });
+    sendUpdate({ type: 'thinking', data: `🤔 Reasoning... (${iteration}/${MAX_ITERATIONS})` });
 
     try {
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json', 
-          'Authorization': `Bearer ${OPENAI_API_KEY}` 
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`
         },
-        body: JSON.stringify({ 
-          model: 'gpt-4o', 
-          messages, 
-          tools 
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          messages,
+          tools
         })
       });
 
@@ -321,68 +350,79 @@ Then: \`execute_server_sql("SELECT TOP 10 PRID, PRNAME FROM PRTASK WITH(NOLOCK) 
 
       const data: any = await response.json();
       const msg = data.choices?.[0]?.message;
-      
+
       if (!msg) break;
 
       if (msg.tool_calls) {
         messages.push(msg);
-        
+
         for (const call of msg.tool_calls) {
           const fn = call.function.name;
-          let args;
-          
+          let args: any = {};
+
           try {
             args = JSON.parse(call.function.arguments);
           } catch (e) {
             console.error('[Tool] Parse error:', call.function.arguments);
-            args = {};
           }
-          
+
           sendUpdate({ type: 'tool', data: `🔧 ${fn}` });
-          
+
           let res = '';
           try {
-            if (fn === 'lookup_object') {
-              res = await lookupObject(args.objectCode || '');
+            if (fn === 'get_objects') {
+              res = await getObjects(credentials);
             }
-            else if (fn === 'execute_server_sql') {
-              res = await executeServerSQL(args.sqlQuery || '');
+            else if (fn === 'get_object_attributes') {
+              res = await getObjectAttributes(args.objectName || '', credentials);
             }
-            else if (fn === 'investigate_table') {
-              res = await investigateTable(args.tableName || '');
+            else if (fn === 'query_object') {
+              res = await queryObject(
+                args.objectName || '',
+                args.fields || [],
+                args.filter || null,
+                credentials
+              );
+            }
+            else if (fn === 'get_record') {
+              res = await getRecord(
+                args.objectName || '',
+                args.recordId || '',
+                credentials
+              );
             }
             else {
               res = `Unknown tool: ${fn}`;
             }
-            
+
             sendUpdate({ type: 'step', data: '✅ Done' });
-          } catch (e: any) { 
+          } catch (e: any) {
             console.error(`[Tool] Error in ${fn}:`, e);
-            res = `Error: ${e.message}`; 
+            res = `Error: ${e.message}`;
             sendUpdate({ type: 'step', data: '❌ Error' });
           }
-          
-          messages.push({ 
-            role: 'tool', 
-            tool_call_id: call.id, 
-            content: res 
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: res
           });
         }
-        
+
         continue;
-        
+
       } else {
         sendUpdate({ type: 'complete', data: msg.content });
         return msg.content;
       }
-      
+
     } catch (e: any) {
       console.error('[AI] Error:', e);
       sendUpdate({ type: 'error', data: `AI error: ${e.message}` });
       return `Error: ${e.message}`;
     }
   }
-  
+
   return 'Search complete (max iterations reached)';
 }
 
@@ -391,10 +431,10 @@ Then: \`execute_server_sql("SELECT TOP 10 PRID, PRNAME FROM PRTASK WITH(NOLOCK) 
 // ============================================================================
 const app = express();
 
-app.use(cors({ 
-  origin: '*', 
-  methods: ['GET', 'POST', 'OPTIONS'], 
-  allowedHeaders: ['Content-Type'] 
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
@@ -402,16 +442,14 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ready',
-    version: 'v18.0-read-only',
-    database: dbConnected ? 'online' : 'offline',
-    mode: 'read-only',
-    objects: clarityObjects.size,
+    version: 'v19.0-rest-api',
+    mode: 'rest-api',
     features: [
-      'sql-queries',
-      'table-investigation',
-      'object-lookup',
-      'read-only-enforced',
-      'multi-step-reasoning'
+      'get-objects',
+      'get-attributes',
+      'query-data',
+      'get-record',
+      'ai-powered'
     ]
   });
 });
@@ -421,45 +459,44 @@ const HOST = '0.0.0.0';
 
 app.post('/api/chat', async (req, res) => {
   console.log('[Chat] Request received');
-  
-  res.writeHead(200, { 
-    'Content-Type': 'text/event-stream', 
-    'Cache-Control': 'no-cache', 
-    'Connection': 'keep-alive', 
-    'Access-Control-Allow-Origin': '*' 
-  });
-  
-  const send = (d: any) => res.write(`data: ${JSON.stringify(d)}\n\n`);
-  
-  try { 
-    await runAIAgentLoop(req.body.message, send); 
-  } catch (e: any) { 
-    console.error('[Chat] Error:', e);
-    send({ type: 'error', data: e.message }); 
+
+  // Extract credentials from request
+  const { message, credentials } = req.body;
+
+  if (!credentials || !credentials.authtoken) {
+    res.status(400).json({ error: 'Missing credentials (authtoken required)' });
+    return;
   }
-  
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*'
+  });
+
+  const send = (d: any) => res.write(`data: ${JSON.stringify(d)}\n\n`);
+
+  try {
+    await runAIAgentLoop(message, credentials, send);
+  } catch (e: any) {
+    console.error('[Chat] Error:', e);
+    send({ type: 'error', data: e.message });
+  }
+
   res.end();
 });
 
-app.listen(PORT, HOST, async () => {
+app.listen(PORT, HOST, () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v18.0 READ-ONLY`);
+  console.log(`🚀 CLARITY MCP v19.0 REST API`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`📖 Mode: READ-ONLY (Queries Only)`);
+  console.log(`🔌 Mode: REST API`);
+  console.log(`🌐 Clarity: ${CLARITY_BASE_URL}`);
   console.log('==========================================================');
   console.log('');
-  
-  await getPool();
-  await loadClarityObjects();
-  
-  console.log('');
-  console.log('==========================================================');
-  console.log(`✅ Server Ready`);
-  console.log(`📊 DB: ${dbConnected ? 'ONLINE' : 'OFFLINE'}`);
-  console.log(`🗺️ Objects: ${clarityObjects.size}`);
-  console.log(`🔒 Mode: READ-ONLY`);
-  console.log('==========================================================');
+  console.log('✅ Server Ready - Waiting for requests with credentials');
   console.log('');
 });
