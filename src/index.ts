@@ -6,27 +6,27 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v19.0 - SESSION MODE (No Auth Token!)");
+console.log("🚀 CLARITY MCP v19.0 - SESSION MODE (No Auth!)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const CLARITY_BASE_URL = process.env.CLARITY_BASE_URL || 'http://16.16.83.171:8080';
 
 console.log('🌐 Clarity URL:', CLARITY_BASE_URL);
-console.log('🔑 Auth: Using browser session cookies (no token needed)');
+console.log('🔑 Auth: Browser session cookies (NO TOKEN REQUIRED)');
 
 let cachedObjects: any = null;
 let cachedAttributes: Map<string, any> = new Map();
 
 // ============================================================================
-// AI TOOLS - These tell the AI to request browser-side execution
+// AI TOOLS - Browser execution mode
 // ============================================================================
 const tools = [
   {
     type: 'function',
     function: {
       name: 'get_objects',
-      description: 'Get list of all available Clarity objects (projects, tasks, resources, etc.). This will execute in the browser using session cookies.',
+      description: 'Get list of all available Clarity objects. Executes in browser with session cookies.',
       parameters: {
         type: 'object',
         properties: {},
@@ -76,39 +76,18 @@ const tools = [
         required: ['objectName', 'fields']
       }
     }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_record',
-      description: 'Get a specific record by ID. Executes in browser.',
-      parameters: {
-        type: 'object',
-        properties: {
-          objectName: {
-            type: 'string',
-            description: 'Name of the object'
-          },
-          recordId: {
-            type: 'string',
-            description: 'ID of the record'
-          }
-        },
-        required: ['objectName', 'recordId']
-      }
-    }
   }
 ];
 
 // ============================================================================
-// TOOL HANDLERS - Send commands to browser for execution
+// TOOL HANDLERS - Send commands to browser
 // ============================================================================
 function handleToolCall(toolCall: any, send: (data: any) => void): Promise<string> {
   return new Promise((resolve) => {
     const { name, arguments: args } = toolCall.function;
     const parsedArgs = JSON.parse(args);
     
-    console.log(`[Tool] ${name} - Requesting browser execution`);
+    console.log(`[Tool] ${name} - Browser will execute`);
     console.log(`[Tool] Args:`, parsedArgs);
     
     let endpoint = '';
@@ -131,19 +110,14 @@ function handleToolCall(toolCall: any, send: (data: any) => void): Promise<strin
         endpoint = `/niku/rest/v1/${obj}?fields=${fieldsParam}${filterParam}&limit=100`;
         break;
         
-      case 'get_record':
-        const { objectName: object, recordId } = parsedArgs;
-        endpoint = `/niku/rest/v1/${object}/${recordId}`;
-        break;
-        
       default:
         resolve(`Unknown tool: ${name}`);
         return;
     }
     
-    // Send command to browser to execute
-    console.log(`[Browser] Requesting: ${method} ${endpoint}`);
+    console.log(`[Browser Command] ${method} ${endpoint}`);
     
+    // Send command to browser
     send({
       type: 'client_execute',
       data: {
@@ -157,9 +131,8 @@ function handleToolCall(toolCall: any, send: (data: any) => void): Promise<strin
       callback_id: toolCall.id
     });
     
-    // The browser will execute and we'll get result back
-    // For now, return a placeholder that will be replaced
-    resolve(`[WAITING_FOR_BROWSER_${toolCall.id}]`);
+    // Placeholder - browser will execute and return result
+    resolve(`[BROWSER_EXECUTING_${toolCall.id}]`);
   });
 }
 
@@ -170,14 +143,14 @@ async function runAIAgentLoop(userMessage: string, send: (data: any) => void) {
   const messages: any[] = [
     {
       role: 'system',
-      content: `You are a helpful assistant that helps users query Clarity PPM data.
+      content: `You are a helpful Clarity PPM assistant. 
 
-IMPORTANT: All REST API calls will execute in the browser using the user's session cookies. No authentication token needed.
+IMPORTANT: All REST API calls execute in the user's browser using their session cookies. No authentication token needed.
 
 WORKFLOW:
-1. If user asks about available objects, use get_objects()
-2. Before querying any object, call get_object_attributes(objectName) to learn fields
-3. Then use query_object() with correct field names
+1. For "available objects": use get_objects()
+2. Before querying: call get_object_attributes(objectName) to learn fields
+3. Then: use query_object() with correct fields
 
 CLARITY FILTER SYNTAX:
 - Basic: (field = 'value')
@@ -192,7 +165,7 @@ Provide clear, helpful responses.`
     }
   ];
   
-  send({ type: 'thinking', data: 'Processing your request...' });
+  send({ type: 'thinking', data: 'Processing...' });
   
   let iterations = 0;
   const maxIterations = 10;
@@ -218,20 +191,17 @@ Provide clear, helpful responses.`
       throw new Error(`OpenAI API error: ${response.status}`);
     }
     
-    const data = await response.json();
+    const data: any = await response.json();
     const choice = data.choices[0];
     const assistantMessage = choice.message;
     
     messages.push(assistantMessage);
     
     if (choice.finish_reason === 'tool_calls') {
-      send({ 
-        type: 'tool_call', 
-        data: `Requesting browser to execute: ${assistantMessage.tool_calls[0].function.name}` 
-      });
+      const toolName = assistantMessage.tool_calls[0].function.name;
+      send({ type: 'tool_call', data: `Requesting browser: ${toolName}` });
       
       for (const toolCall of assistantMessage.tool_calls) {
-        // Send browser execution request
         const result = await handleToolCall(toolCall, send);
         
         messages.push({
@@ -263,13 +233,20 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// Logging middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     version: '19.0.0-session',
-    mode: 'session-cookies',
+    mode: 'browser-session',
     clarity: CLARITY_BASE_URL,
-    auth: 'browser-session'
+    auth: 'none-required',
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -285,16 +262,25 @@ const PORT = parseInt(process.env.PORT || '3001');
 const HOST = '0.0.0.0';
 
 app.post('/api/chat', async (req, res) => {
+  console.log('[Chat] ========================================');
   console.log('[Chat] Request received');
+  console.log('[Chat] Body:', JSON.stringify(req.body, null, 2));
+  console.log('[Chat] ========================================');
 
   const { message } = req.body;
 
   if (!message) {
-    res.status(400).json({ error: 'Missing message' });
+    console.error('[Chat] ❌ Missing message in request body');
+    res.status(400).json({ 
+      error: 'Missing message',
+      received: req.body,
+      expected: { message: 'string' }
+    });
     return;
   }
 
-  console.log('[Chat] Using browser session mode - no auth token needed');
+  console.log('[Chat] ✅ Message received:', message);
+  console.log('[Chat] Using browser session mode - no auth needed');
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -303,16 +289,20 @@ app.post('/api/chat', async (req, res) => {
     'Access-Control-Allow-Origin': '*'
   });
 
-  const send = (d: any) => res.write(`data: ${JSON.stringify(d)}\n\n`);
+  const send = (d: any) => {
+    console.log('[Send]', d.type);
+    res.write(`data: ${JSON.stringify(d)}\n\n`);
+  };
 
   try {
     await runAIAgentLoop(message, send);
   } catch (e: any) {
-    console.error('[Chat] Error:', e);
+    console.error('[Chat] ❌ Error:', e);
     send({ type: 'error', data: e.message });
   }
 
   res.end();
+  console.log('[Chat] Stream ended');
 });
 
 app.listen(PORT, HOST, () => {
@@ -321,11 +311,12 @@ app.listen(PORT, HOST, () => {
   console.log(`🚀 CLARITY MCP v19.0 - SESSION MODE`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`🔌 Mode: Browser Session Cookies`);
+  console.log(`🔌 Mode: Browser Session (NO AUTH TOKEN!)`);
   console.log(`🌐 Clarity: ${CLARITY_BASE_URL}`);
-  console.log(`🔑 Auth: Using browser's logged-in session`);
+  console.log(`🔑 Auth: Browser cookies only`);
   console.log('==========================================================');
   console.log('');
-  console.log('✅ Server Ready - Browser will execute REST calls');
+  console.log('✅ Server Ready - Waiting for chat requests');
+  console.log('   POST /api/chat with body: { "message": "your question" }');
   console.log('');
 });
