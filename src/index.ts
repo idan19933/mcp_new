@@ -6,42 +6,24 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v19.1 - SERVER-SIDE EXECUTION");
+console.log("🚀 CLARITY MCP v20.0 - BROWSER EXECUTION (WITH RESPONSE)");
 console.log("==========================================================");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const CLARITY_BASE_URL = process.env.CLARITY_BASE_URL || 'http://16.16.83.171/ppm/rest/v1';
-const CLARITY_AUTH_TOKEN = process.env.CLARITY_AUTH_TOKEN || 'YOUR_AUTH_TOKEN_HERE';
+const CLARITY_BASE_URL = process.env.CLARITY_BASE_URL || 'http://16.16.83.171:8080';
 
 console.log('🌐 Clarity URL:', CLARITY_BASE_URL);
-console.log('🔑 Auth Token:', CLARITY_AUTH_TOKEN.substring(0, 20) + '...');
+console.log('🔑 Auth: Browser session (no token needed)');
 
 let cachedObjects: any = null;
 let cachedAttributes: Map<string, any> = new Map();
 
-// ============================================================================
-// CLARITY REST API CLIENT - Server makes the calls
-// ============================================================================
-async function callClarityAPI(endpoint: string): Promise<any> {
-  const url = `${CLARITY_BASE_URL}${endpoint}`;
-  
-  console.log(`[API] GET ${url}`);
-  
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'accept': 'application/json',
-      'authtoken': CLARITY_AUTH_TOKEN
-    }
-  });
-  
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`HTTP ${response.status}: ${errorText}`);
-  }
-  
-  return response.json();
-}
+// Store pending tool calls waiting for browser response
+const pendingToolCalls = new Map<string, {
+  resolve: (value: any) => void;
+  reject: (reason: any) => void;
+  timeout: NodeJS.Timeout;
+}>();
 
 // ============================================================================
 // AI TOOLS
@@ -80,7 +62,7 @@ const tools = [
     type: 'function',
     function: {
       name: 'query_object',
-      description: 'Query data from a Clarity object. Returns all matching records (no limit).',
+      description: 'Query data from a Clarity object. Returns all matching records.',
       parameters: {
         type: 'object',
         properties: {
@@ -95,7 +77,7 @@ const tools = [
           },
           filter: {
             type: 'string',
-            description: 'Filter expression in Clarity syntax, e.g., "(isActive = true)". Leave empty to get all records.'
+            description: 'Filter expression in Clarity syntax. Leave empty to get all records.'
           }
         },
         required: ['objectName', 'fields']
@@ -105,60 +87,66 @@ const tools = [
 ];
 
 // ============================================================================
-// TOOL HANDLERS - Server executes directly
+// TOOL HANDLERS - Request browser execution
 // ============================================================================
-async function handleToolCall(toolCall: any): Promise<string> {
+async function handleToolCall(toolCall: any, send: (data: any) => void): Promise<string> {
   const { name, arguments: args } = toolCall.function;
   const parsedArgs = JSON.parse(args);
   
   console.log(`[Tool] ${name}`);
   console.log(`[Tool] Args:`, parsedArgs);
   
-  try {
-    switch (name) {
-      case 'get_objects': {
-        if (cachedObjects) {
-          console.log('[Cache] Returning cached objects');
-          return JSON.stringify(cachedObjects);
-        }
-        
-        const result = await callClarityAPI('/describe?filter=((extensions in (\'inv\')))');
-        cachedObjects = result;
-        return JSON.stringify(result);
-      }
+  let endpoint = '';
+  
+  switch (name) {
+    case 'get_objects':
+      endpoint = '/niku/rest/v1/describe?filter=((extensions in (\'inv\')))';
+      break;
       
-      case 'get_object_attributes': {
-        const { objectName } = parsedArgs;
-        
-        if (cachedAttributes.has(objectName)) {
-          console.log(`[Cache] Returning cached attributes for ${objectName}`);
-          return JSON.stringify(cachedAttributes.get(objectName));
-        }
-        
-        const result = await callClarityAPI(`/describeAttributes?filter=(resourceName='${objectName}')`);
-        cachedAttributes.set(objectName, result);
-        return JSON.stringify(result);
-      }
+    case 'get_object_attributes':
+      const { objectName } = parsedArgs;
+      endpoint = `/niku/rest/v1/describeAttributes?filter=(resourceName='${objectName}')`;
+      break;
       
-      case 'query_object': {
-        const { objectName, fields, filter } = parsedArgs;
-        const fieldsParam = fields.join(',');
-        const filterParam = filter ? `&filter=${encodeURIComponent(filter)}` : '';
-        
-        // NO LIMIT - get all results
-        const result = await callClarityAPI(`/${objectName}?fields=${fieldsParam}${filterParam}`);
-        
-        console.log(`[Query] Got ${result.length || 0} records`);
-        return JSON.stringify(result);
-      }
+    case 'query_object':
+      const { objectName: obj, fields, filter } = parsedArgs;
+      const fieldsParam = fields.join(',');
+      const filterParam = filter ? `&filter=${encodeURIComponent(filter)}` : '';
+      endpoint = `/niku/rest/v1/${obj}?fields=${fieldsParam}${filterParam}`;
+      break;
       
-      default:
-        return `Unknown tool: ${name}`;
-    }
-  } catch (error: any) {
-    console.error(`[Tool Error] ${name}:`, error.message);
-    return `Error: ${error.message}`;
+    default:
+      return `Unknown tool: ${name}`;
   }
+  
+  // Generate unique request ID
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  
+  console.log(`[Request ${requestId}] Sending to browser: ${endpoint}`);
+  
+  // Send command to browser
+  send({
+    type: 'client_execute',
+    requestId: requestId,
+    data: {
+      url: endpoint,
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      }
+    }
+  });
+  
+  // Wait for browser response (with timeout)
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingToolCalls.delete(requestId);
+      reject(new Error('Browser execution timeout (30s)'));
+    }, 30000); // 30 second timeout
+    
+    pendingToolCalls.set(requestId, { resolve, reject, timeout });
+  });
 }
 
 // ============================================================================
@@ -170,15 +158,17 @@ async function runAIAgentLoop(userMessage: string, send: (data: any) => void) {
       role: 'system',
       content: `You are a helpful Clarity PPM assistant.
 
+All REST API calls execute in the user's browser using their session cookies.
+
 WORKFLOW:
 1. For "available objects": use get_objects()
 2. Before querying: call get_object_attributes(objectName) to learn fields
 3. Then: use query_object() with correct fields
 
-IMPORTANT NOTES:
+IMPORTANT:
 - query_object returns ALL matching records (no limit)
-- Use filters wisely to narrow results when needed
-- For counting/aggregation: you can process the full result set
+- Use filters to narrow results when needed
+- You can process full result sets for counting/analysis
 
 CLARITY FILTER SYNTAX:
 - Basic: (field = 'value')
@@ -186,7 +176,7 @@ CLARITY FILTER SYNTAX:
 - LIKE: (name like '%search%')
 - IS NOT NULL: (field is not null)
 
-Provide clear, helpful, data-driven responses.`
+Provide clear, data-driven answers.`
     },
     {
       role: 'user',
@@ -228,16 +218,29 @@ Provide clear, helpful, data-driven responses.`
     
     if (choice.finish_reason === 'tool_calls') {
       const toolName = assistantMessage.tool_calls[0].function.name;
-      send({ type: 'tool_call', data: `Using: ${toolName}` });
+      send({ type: 'tool_call', data: `Requesting browser: ${toolName}` });
       
       for (const toolCall of assistantMessage.tool_calls) {
-        const result = await handleToolCall(toolCall);
-        
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: result
-        });
+        try {
+          // This will wait for browser response
+          const result = await handleToolCall(toolCall, send);
+          
+          console.log(`[Tool Result] Got ${result.length} chars`);
+          
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: result
+          });
+        } catch (error: any) {
+          console.error(`[Tool Error]`, error.message);
+          
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: `Error: ${error.message}`
+          });
+        }
       }
       
       continue;
@@ -270,12 +273,39 @@ app.use((req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    version: '19.1.0-server-side',
-    mode: 'server-execution',
+    version: '20.0.0-browser-exec',
+    mode: 'browser-execution-with-response',
     clarity: CLARITY_BASE_URL,
-    auth: 'server-token',
+    auth: 'browser-session',
     timestamp: new Date().toISOString()
   });
+});
+
+// Endpoint for browser to send back results
+app.post('/api/tool-response', (req, res) => {
+  const { requestId, success, data, error } = req.body;
+  
+  console.log(`[Response ${requestId}] Received from browser`);
+  
+  const pending = pendingToolCalls.get(requestId);
+  
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingToolCalls.delete(requestId);
+    
+    if (success) {
+      console.log(`[Response ${requestId}] Success`);
+      pending.resolve(JSON.stringify(data));
+    } else {
+      console.log(`[Response ${requestId}] Error: ${error}`);
+      pending.reject(new Error(error || 'Browser execution failed'));
+    }
+    
+    res.json({ received: true });
+  } else {
+    console.log(`[Response ${requestId}] Not found or already processed`);
+    res.json({ received: false, reason: 'Request not found' });
+  }
 });
 
 const PORT = parseInt(process.env.PORT || '3001');
@@ -320,14 +350,14 @@ app.post('/api/chat', async (req, res) => {
 app.listen(PORT, HOST, () => {
   console.log('');
   console.log('==========================================================');
-  console.log(`🚀 CLARITY MCP v19.1 - SERVER-SIDE EXECUTION`);
+  console.log(`🚀 CLARITY MCP v20.0 - BROWSER EXECUTION`);
   console.log(`📡 Server: http://${HOST}:${PORT}`);
   console.log(`🏥 Health: http://${HOST}:${PORT}/health`);
-  console.log(`🔌 Mode: Server executes all REST calls`);
+  console.log(`🔌 Mode: Browser executes, server waits for response`);
   console.log(`🌐 Clarity: ${CLARITY_BASE_URL}`);
-  console.log(`🔑 Auth: Server-side token`);
+  console.log(`🔑 Auth: Browser session cookies (automatic)`);
   console.log('==========================================================');
   console.log('');
-  console.log('✅ Server Ready - No client-side execution needed');
+  console.log('✅ Server Ready - Browser will execute and respond');
   console.log('');
 });
