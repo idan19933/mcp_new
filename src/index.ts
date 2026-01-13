@@ -46,13 +46,13 @@ const tools = [
     type: 'function',
     function: {
       name: 'get_object_attributes',
-      description: 'STEP 2: Get complete schema for a specific object. Returns ALL available fields with their types, descriptions, and constraints. ALWAYS call this before querying to know which fields exist. Use exact field names from this response in your queries.',
+      description: 'STEP 2: Get complete schema. Returns ALL fields with EXACT names you MUST use. ⚠️ CRITICAL: Use these exact field names in queries! Common mistakes: "code" → use "projectCode"/"resourceCode"/"taskCode" instead.',
       parameters: {
         type: 'object',
         properties: {
           objectName: {
             type: 'string',
-            description: 'Exact name of the object from get_objects (e.g., "projects", "tasks", "resources", "ideas", "custPs")'
+            description: 'Exact name from get_objects (plural: "projects", "tasks", "resources")'
           }
         },
         required: ['objectName']
@@ -175,76 +175,53 @@ async function runAIAgentLoop(userMessage: string, send: (data: any) => void) {
   const messages: any[] = [
     {
       role: 'system',
-      content: `You are a Clarity PPM AI assistant. You can work with ANY object in the system.
+      content: `You are a Clarity PPM AI assistant. Be CONCISE and DIRECT.
 
-## MANDATORY WORKFLOW (ALWAYS FOLLOW):
+## COMMON FIELD NAMES (Use these to save time):
+**Projects**: name, projectCode, manager, status, startDate, finishDate, percentComplete, isActive
+**Tasks**: name, taskCode, projectCode, assignedTo, startDate, finish, percentComplete, status
+**Resources**: fullName, resourceCode, emailAddress, departmentCode, isActive, location
+**Ideas**: name, ideaCode, status, submittedBy, submittedDate
+**Objectives**: name, code, owner, status
 
-### Step 1: Discover Available Objects
-- ALWAYS start with: get_objects()
-- Find which object matches user's request
-- Objects include: projects, tasks, resources, ideas, objectives, timesheets, risks, issues, portfolios, programs, custom objects, etc.
+## WORKFLOW (BE EFFICIENT):
 
-### Step 2: Learn Object's Fields
-- ALWAYS call: get_object_attributes(objectName)
-- Get complete list of available fields
-- Match user's requested fields to actual field names
-- Remember: field names are case-sensitive!
+1. **get_objects()** → Find object (skip if you know it's projects/tasks/resources)
+2. **get_object_attributes(name)** → ONLY if using uncommon fields or custom objects
+3. **query_object(name, fields, filter)** → Get data
+4. **Answer DIRECTLY** → 1-2 sentences MAX
 
-### Step 3: Query Data with Filters
-- Call: query_object(objectName, fields, filter)
-- Include ALL fields user asked for
-- Add filters based on user's conditions
-- Returns ALL matching records (no limit)
+## SPEED TIPS:
+- For simple counts: just use ['id'] field
+- For common queries on projects/tasks/resources: use common fields above, skip get_object_attributes
+- Only call get_object_attributes for custom objects or unusual fields
+- Answer in ONE SHORT sentence
 
-### Step 4: Present Results
-- Format as: table, list, count, chart, summary
-- Answer user's question clearly
-- Show relevant data
+## EXAMPLES:
 
-## REAL EXAMPLES:
+User: "how many projects"
+→ query_object('projects', ['id'])
+→ "**41 projects**."
 
-Example 1: "Show me all resources in Finance department"
-1. get_objects() → find: resources
-2. get_object_attributes('resources') → fields: name, department, email, role
-3. query_object('resources', ['name', 'department', 'email'], '(department = "Finance")')
-4. Present: table with name, email
+User: "overdue tasks"  
+→ query_object('tasks', ['id'], '(finish < @today@) and (percentComplete < 100)')
+→ "**23 overdue tasks**."
 
-Example 2: "Count how many tasks are overdue"
-1. get_objects() → find: tasks
-2. get_object_attributes('tasks') → fields: id, finishDate, status
-3. query_object('tasks', ['id', 'finishDate'], '(finishDate < @today@) and (status != "Completed")')
-4. Present: "Found 23 overdue tasks"
+User: "IT resources"
+→ query_object('resources', ['fullName'], '(departmentCode = "IT")')
+→ "**5 resources**: John, Mary, Bob, Alice, Tom."
 
-Example 3: "List all ideas with status Open"
-1. get_objects() → find: ideas
-2. get_object_attributes('ideas') → fields: name, status, submittedBy
-3. query_object('ideas', ['name', 'submittedBy'], '(status = "Open")')
-4. Present: list with names and submitters
-
-Example 4: "Show me custom object custPs data"
-1. get_objects() → find: custPs (custom object)
-2. get_object_attributes('custPs') → get all custom fields
-3. query_object('custPs', [fields], optional_filter)
-4. Present: data
+User: "tasks in project ABC"
+→ query_object('tasks', ['id'], '(projectCode = "ABC")')
+→ "**367 tasks** in project ABC."
 
 ## FILTER SYNTAX:
-- Equals: (field = 'value') or (field = 123)
-- Not equals: (field != 'value')
-- Comparison: (field > 100), (field < 100), (field >= 50)
-- Like: (field LIKE '%search%')
-- In list: (field IN ('a', 'b', 'c'))
-- Multiple: (field1 = 'a') AND (field2 = 'b')
-- Or: (field1 = 'a') OR (field2 = 'b')
-- Null: (field is null) or (field is not null)
+- (field = 'value')
+- (field < @today@)
+- (field != 'value') 
+- (field1 = 'a') and (field2 = 'b')
 
-## IMPORTANT RULES:
-1. NEVER assume field names - always call get_object_attributes() first
-2. ALWAYS use exact field names from describeAttributes
-3. For pluralization: 'project' → use 'projects', 'task' → use 'tasks'
-4. Can work with ANY object - system objects OR custom objects
-5. Present data clearly - use tables for multiple records, counts for numbers
-
-You are smart, thorough, and data-driven. Follow the workflow exactly.`
+BE FAST. BE DIRECT. ONE SENTENCE ANSWERS.`
     },
     {
       role: 'user',
@@ -289,15 +266,15 @@ You are smart, thorough, and data-driven. Follow the workflow exactly.`
       // Handle rate limit (429)
       if (response.status === 429) {
         retries++;
-        const waitTime = Math.pow(2, retries) * 1000; // Exponential backoff: 2s, 4s, 8s
+        const waitTime = Math.pow(2, retries) * 2000; // Longer backoff: 4s, 8s, 16s
         console.log(`[Retry ${retries}/${maxRetries}] Rate limited, waiting ${waitTime}ms...`);
         
         if (retries < maxRetries) {
-          send({ type: 'thinking', data: `Rate limited, retrying in ${waitTime/1000}s...` });
+          send({ type: 'thinking', data: `Rate limited, waiting ${waitTime/1000}s...` });
           await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
         } else {
-          throw new Error('Rate limit exceeded. Please wait a moment and try again.');
+          throw new Error('Rate limit exceeded. Please wait 1 minute and try again.');
         }
       }
       
