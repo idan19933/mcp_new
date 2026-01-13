@@ -314,8 +314,17 @@ You are smart, thorough, and data-driven. Follow the workflow exactly.`
     
     // Claude response format
     if (data.stop_reason === 'tool_use') {
+      // First, add the assistant message with tool_use
+      messages.push({
+        role: 'assistant',
+        content: data.content
+      });
+      
       // Find tool use blocks
       const toolUseBlocks = data.content.filter((block: any) => block.type === 'tool_use');
+      
+      // Collect all tool results
+      const toolResults: any[] = [];
       
       for (const toolBlock of toolUseBlocks) {
         const toolName = toolBlock.name;
@@ -334,38 +343,27 @@ You are smart, thorough, and data-driven. Follow the workflow exactly.`
           const result = await handleToolCall(toolCall, send);
           console.log(`[Tool Result] Got ${result.length} chars`);
           
-          // Add tool result to messages (Claude format)
-          messages.push({
-            role: 'user',
-            content: [
-              {
-                type: 'tool_result',
-                tool_use_id: toolBlock.id,
-                content: result
-              }
-            ]
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolBlock.id,
+            content: result
           });
         } catch (error: any) {
           console.error(`[Tool Error]`, error.message);
           
-          messages.push({
-            role: 'user',
-            content: [
-              {
-                type: 'tool_result',
-                tool_use_id: toolBlock.id,
-                content: `Error: ${error.message}`,
-                is_error: true
-              }
-            ]
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolBlock.id,
+            content: `Error: ${error.message}`,
+            is_error: true
           });
         }
       }
       
-      // Add assistant message with tool use
+      // Add all tool results in one user message
       messages.push({
-        role: 'assistant',
-        content: data.content
+        role: 'user',
+        content: toolResults
       });
       
       continue;
