@@ -208,25 +208,36 @@ async function runAIAgentLoop(userMessage: string, send: (data: any) => void) {
 - get_object_attributes: Call ONCE per object per conversation
 - Cached results are automatically reused
 
+⚠️ ERROR HANDLING:
+- If a field causes 400 error, try a different field from the schema
+- If you get "Max iterations", give best answer with available data
+- Common issue: Some fields are secured/hidden - try alternatives
+
 ## COMMON FIELD NAMES (Use these to save time):
-**Projects**: name, projectCode, manager, status, startDate, finishDate, percentComplete, isActive
-**Tasks**: name, taskCode, projectCode, assignedTo, startDate, finish, percentComplete, status
+**Projects**: name, projectCode, manager, status, startDate, finishDate, percentComplete, isActive, investmentId
+**Tasks**: name, taskCode, projectCode, assignedTo, start, finish, percentComplete, status, isActive, investmentId
 **Resources**: fullName, resourceCode, emailAddress, departmentCode, isActive, location
 **Ideas**: name, ideaCode, status, submittedBy, submittedDate
 **Objectives**: name, code, owner, status
 
+⚠️ FOR OVERDUE TASKS:
+- Use: (finish < @today@) and (percentComplete < 100)
+- Field name is "finish" not "finishDate"
+- Always check if field exists in schema first!
+
 ## WORKFLOW (BE EFFICIENT):
 
-1. **FIRST query only**: get_objects() → Find object (skip for projects/tasks/resources)
-2. **FIRST time per object**: get_object_attributes(name) → ONLY if using uncommon fields
-3. **Every query**: query_object(name, fields, filter) → Get data
-4. **Answer DIRECTLY** → 1-2 sentences MAX
+1. **FIRST query only**: get_objects() if needed
+2. **FIRST time per object**: get_object_attributes(name) to learn fields
+3. **Every query**: query_object(name, fields, filter)
+4. **If error**: Check schema for correct field name, try again ONCE
+5. **Answer DIRECTLY** → 1 sentence MAX
 
 ## SPEED TIPS:
-- For simple counts: just use ['id'] field
-- For common queries on projects/tasks/resources: use common fields above, skip get_object_attributes
-- Only call get_object_attributes ONCE per object, results are cached!
-- Answer in ONE SHORT sentence
+- For simple counts: use ['id'] or ['name']
+- For filtering by project: use filter with projectCode or investmentId
+- If query fails, use simpler fields like 'id' instead
+- One sentence answers only
 
 ## EXAMPLES:
 
@@ -235,24 +246,22 @@ Query 1: "how many projects"
 → "**41 projects**."
 
 Query 2: "overdue tasks"  
+→ get_object_attributes('tasks') [ONCE to verify 'finish' field exists]
 → query_object('tasks', ['id'], '(finish < @today@) and (percentComplete < 100)')
 → "**23 overdue tasks**."
 
-Query 3: "IT resources"
-→ query_object('resources', ['fullName'], '(departmentCode = "IT")')
-→ "**5 resources**: John, Mary, Bob, Alice, Tom."
-
-Query 4: "tasks in project ABC"
-→ query_object('tasks', ['id'], '(projectCode = "ABC")')
-→ "**367 tasks** in project ABC."
+Query 3: "overdue tasks in project ABC"
+→ query_object('tasks', ['id'], '(projectCode = "ABC") and (finish < @today@) and (percentComplete < 100)')
+→ "**12 overdue tasks** in project ABC."
 
 ## FILTER SYNTAX:
 - (field = 'value')
-- (field < @today@)
+- (field < @today@) for dates
 - (field != 'value') 
 - (field1 = 'a') and (field2 = 'b')
+- For project filter: (projectCode = 'code') or (investmentId = 12345)
 
-BE FAST. BE DIRECT. ONE SENTENCE. NO REPEATED CALLS.`
+BE FAST. BE DIRECT. ONE SENTENCE. HANDLE ERRORS SMARTLY.`
     },
     {
       role: 'user',
@@ -263,7 +272,7 @@ BE FAST. BE DIRECT. ONE SENTENCE. NO REPEATED CALLS.`
   send({ type: 'thinking', data: 'Processing...' });
   
   let iterations = 0;
-  const maxIterations = 10;
+  const maxIterations = 15; // Increased from 10
   
   while (iterations < maxIterations) {
     iterations++;
