@@ -6,14 +6,15 @@ import cors from 'cors';
 dotenv.config();
 
 console.log("==========================================================");
-console.log("🚀 CLARITY MCP v20.0 - BROWSER EXECUTION (WITH RESPONSE)");
+console.log("🚀 CLARITY AI ASSISTANT v24.0 - CLAUDE POWERED");
 console.log("==========================================================");
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const CLARITY_BASE_URL = process.env.CLARITY_BASE_URL || 'http://16.16.83.171/ppm/rest/v1';
 
 console.log('🌐 Clarity URL:', CLARITY_BASE_URL);
-console.log('🔑 Auth: Browser session (no token needed)');
+console.log('🤖 AI: Claude Sonnet 4');
+console.log('🔑 Auth: Browser session');
 
 let cachedObjects: any = null;
 let cachedAttributes: Map<string, any> = new Map();
@@ -265,17 +266,23 @@ You are smart, thorough, and data-driven. Follow the workflow exactly.`
     
     // Retry loop for rate limits
     while (retries < maxRetries) {
-      response = await fetch('https://api.openai.com/v1/chat/completions', {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o',
-          messages,
-          tools,
-          temperature: 0.7
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 8096,
+          messages: messages.filter((m: any) => m.role !== 'system'),
+          system: messages.find((m: any) => m.role === 'system')?.content || '',
+          tools: tools.map((t: any) => ({
+            name: t.function.name,
+            description: t.function.description,
+            input_schema: t.function.parameters
+          }))
         })
       });
       
@@ -299,47 +306,77 @@ You are smart, thorough, and data-driven. Follow the workflow exactly.`
     }
     
     if (!response || !response.ok) {
-      throw new Error(`OpenAI API error: ${response?.status || 'unknown'}`);
+      const errorText = response ? await response.text() : 'unknown';
+      throw new Error(`Claude API error: ${response?.status || 'unknown'} - ${errorText}`);
     }
     
     const data: any = await response.json();
-    const choice = data.choices[0];
-    const assistantMessage = choice.message;
     
-    messages.push(assistantMessage);
-    
-    if (choice.finish_reason === 'tool_calls') {
-      const toolName = assistantMessage.tool_calls[0].function.name;
-      send({ type: 'tool_call', data: `Requesting browser: ${toolName}` });
+    // Claude response format
+    if (data.stop_reason === 'tool_use') {
+      // Find tool use blocks
+      const toolUseBlocks = data.content.filter((block: any) => block.type === 'tool_use');
       
-      for (const toolCall of assistantMessage.tool_calls) {
+      for (const toolBlock of toolUseBlocks) {
+        const toolName = toolBlock.name;
+        send({ type: 'tool_call', data: `Requesting browser: ${toolName}` });
+        
         try {
-          // This will wait for browser response
-          const result = await handleToolCall(toolCall, send);
+          // Create OpenAI-style tool call for compatibility
+          const toolCall = {
+            id: toolBlock.id,
+            function: {
+              name: toolBlock.name,
+              arguments: JSON.stringify(toolBlock.input)
+            }
+          };
           
+          const result = await handleToolCall(toolCall, send);
           console.log(`[Tool Result] Got ${result.length} chars`);
           
+          // Add tool result to messages (Claude format)
           messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: result
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: toolBlock.id,
+                content: result
+              }
+            ]
           });
         } catch (error: any) {
           console.error(`[Tool Error]`, error.message);
           
           messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: `Error: ${error.message}`
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: toolBlock.id,
+                content: `Error: ${error.message}`,
+                is_error: true
+              }
+            ]
           });
         }
       }
       
+      // Add assistant message with tool use
+      messages.push({
+        role: 'assistant',
+        content: data.content
+      });
+      
       continue;
     }
     
-    if (choice.finish_reason === 'stop') {
-      send({ type: 'complete', data: assistantMessage.content });
+    if (data.stop_reason === 'end_turn' || data.stop_reason === 'stop_sequence') {
+      // Extract text from content blocks
+      const textBlocks = data.content.filter((block: any) => block.type === 'text');
+      const responseText = textBlocks.map((block: any) => block.text).join('\n');
+      
+      send({ type: 'complete', data: responseText });
       break;
     }
   }
