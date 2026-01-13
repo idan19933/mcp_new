@@ -170,7 +170,7 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
   });
   
   // Wait for browser response (with timeout)
-  const result = await new Promise((resolve, reject) => {
+  const result: string = await new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => {
       pendingToolCalls.delete(requestId);
       reject(new Error('Browser execution timeout (30s)'));
