@@ -33,7 +33,7 @@ const tools = [
     type: 'function',
     function: {
       name: 'get_objects',
-      description: 'Get list of all available Clarity objects (projects, tasks, resources, etc.)',
+      description: 'STEP 1: Get list of ALL available Clarity objects. Use this FIRST to discover what objects exist. Returns system objects (projects, tasks, resources, ideas, objectives, etc.) AND custom objects (custXxx). This is your starting point for ANY query.',
       parameters: {
         type: 'object',
         properties: {},
@@ -45,13 +45,13 @@ const tools = [
     type: 'function',
     function: {
       name: 'get_object_attributes',
-      description: 'Get all fields/attributes for a specific Clarity object',
+      description: 'STEP 2: Get complete schema for a specific object. Returns ALL available fields with their types, descriptions, and constraints. ALWAYS call this before querying to know which fields exist. Use exact field names from this response in your queries.',
       parameters: {
         type: 'object',
         properties: {
           objectName: {
             type: 'string',
-            description: 'Name of the object (e.g., "project", "task", "resource")'
+            description: 'Exact name of the object from get_objects (e.g., "projects", "tasks", "resources", "ideas", "custPs")'
           }
         },
         required: ['objectName']
@@ -62,22 +62,22 @@ const tools = [
     type: 'function',
     function: {
       name: 'query_object',
-      description: 'Query data from a Clarity object. Returns all matching records.',
+      description: 'STEP 3: Query actual data from an object. Returns ALL matching records (no pagination). Use exact field names from get_object_attributes. Apply filters to narrow results. This is how you get the actual data to answer the user.',
       parameters: {
         type: 'object',
         properties: {
           objectName: {
             type: 'string',
-            description: 'Name of the object to query'
+            description: 'Object name from get_objects (plural form: "projects", "tasks", etc.)'
           },
           fields: {
             type: 'array',
             items: { type: 'string' },
-            description: 'List of fields to return'
+            description: 'Exact field names from get_object_attributes. Include all fields needed to answer the user.'
           },
           filter: {
             type: 'string',
-            description: 'Filter expression in Clarity syntax. Leave empty to get all records.'
+            description: 'Optional Clarity NSQL filter. Examples: (status = "Open"), (department = "IT"), (finishDate < @today@). Leave empty for all records.'
           }
         },
         required: ['objectName', 'fields']
@@ -174,27 +174,76 @@ async function runAIAgentLoop(userMessage: string, send: (data: any) => void) {
   const messages: any[] = [
     {
       role: 'system',
-      content: `You are a helpful Clarity PPM assistant.
+      content: `You are a Clarity PPM AI assistant. You can work with ANY object in the system.
 
-All REST API calls execute in the user's browser using their session cookies.
+## MANDATORY WORKFLOW (ALWAYS FOLLOW):
 
-WORKFLOW:
-1. For "available objects": use get_objects()
-2. Before querying: call get_object_attributes(objectName) to learn fields
-3. Then: use query_object() with correct fields
+### Step 1: Discover Available Objects
+- ALWAYS start with: get_objects()
+- Find which object matches user's request
+- Objects include: projects, tasks, resources, ideas, objectives, timesheets, risks, issues, portfolios, programs, custom objects, etc.
 
-IMPORTANT:
-- query_object returns ALL matching records (no limit)
-- Use filters to narrow results when needed
-- You can process full result sets for counting/analysis
+### Step 2: Learn Object's Fields
+- ALWAYS call: get_object_attributes(objectName)
+- Get complete list of available fields
+- Match user's requested fields to actual field names
+- Remember: field names are case-sensitive!
 
-CLARITY FILTER SYNTAX:
-- Basic: (field = 'value')
-- Multiple: (field1 = 'a') and (field2 = 'b')
-- LIKE: (name like '%search%')
-- IS NOT NULL: (field is not null)
+### Step 3: Query Data with Filters
+- Call: query_object(objectName, fields, filter)
+- Include ALL fields user asked for
+- Add filters based on user's conditions
+- Returns ALL matching records (no limit)
 
-Provide clear, data-driven answers.`
+### Step 4: Present Results
+- Format as: table, list, count, chart, summary
+- Answer user's question clearly
+- Show relevant data
+
+## REAL EXAMPLES:
+
+Example 1: "Show me all resources in Finance department"
+1. get_objects() → find: resources
+2. get_object_attributes('resources') → fields: name, department, email, role
+3. query_object('resources', ['name', 'department', 'email'], '(department = "Finance")')
+4. Present: table with name, email
+
+Example 2: "Count how many tasks are overdue"
+1. get_objects() → find: tasks
+2. get_object_attributes('tasks') → fields: id, finishDate, status
+3. query_object('tasks', ['id', 'finishDate'], '(finishDate < @today@) and (status != "Completed")')
+4. Present: "Found 23 overdue tasks"
+
+Example 3: "List all ideas with status Open"
+1. get_objects() → find: ideas
+2. get_object_attributes('ideas') → fields: name, status, submittedBy
+3. query_object('ideas', ['name', 'submittedBy'], '(status = "Open")')
+4. Present: list with names and submitters
+
+Example 4: "Show me custom object custPs data"
+1. get_objects() → find: custPs (custom object)
+2. get_object_attributes('custPs') → get all custom fields
+3. query_object('custPs', [fields], optional_filter)
+4. Present: data
+
+## FILTER SYNTAX:
+- Equals: (field = 'value') or (field = 123)
+- Not equals: (field != 'value')
+- Comparison: (field > 100), (field < 100), (field >= 50)
+- Like: (field LIKE '%search%')
+- In list: (field IN ('a', 'b', 'c'))
+- Multiple: (field1 = 'a') AND (field2 = 'b')
+- Or: (field1 = 'a') OR (field2 = 'b')
+- Null: (field is null) or (field is not null)
+
+## IMPORTANT RULES:
+1. NEVER assume field names - always call get_object_attributes() first
+2. ALWAYS use exact field names from describeAttributes
+3. For pluralization: 'project' → use 'projects', 'task' → use 'tasks'
+4. Can work with ANY object - system objects OR custom objects
+5. Present data clearly - use tables for multiple records, counts for numbers
+
+You are smart, thorough, and data-driven. Follow the workflow exactly.`
     },
     {
       role: 'user',
