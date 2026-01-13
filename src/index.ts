@@ -101,11 +101,23 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
   
   switch (name) {
     case 'get_objects':
+      // Check cache first
+      if (cachedObjects) {
+        console.log('[Cache] Using cached objects');
+        return JSON.stringify(cachedObjects);
+      }
       endpoint = '/ppm/rest/v1/describe?filter=((extensions in (\'inv\')))';
       break;
       
     case 'get_object_attributes':
       const { objectName } = parsedArgs;
+      
+      // Check cache first
+      if (cachedAttributes.has(objectName)) {
+        console.log(`[Cache] Using cached attributes for ${objectName}`);
+        return JSON.stringify(cachedAttributes.get(objectName));
+      }
+      
       endpoint = `/ppm/rest/v1/describeAttributes?filter=(resourceName+%3D+%27${objectName}%27)`;
       break;
       
@@ -158,7 +170,7 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
   });
   
   // Wait for browser response (with timeout)
-  return new Promise((resolve, reject) => {
+  const result = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       pendingToolCalls.delete(requestId);
       reject(new Error('Browser execution timeout (30s)'));
@@ -166,6 +178,20 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
     
     pendingToolCalls.set(requestId, { resolve, reject, timeout });
   });
+  
+  // Cache results for get_objects and get_object_attributes
+  if (name === 'get_objects' && !cachedObjects) {
+    cachedObjects = JSON.parse(result);
+    console.log('[Cache] Stored objects');
+  } else if (name === 'get_object_attributes') {
+    const { objectName } = parsedArgs;
+    if (!cachedAttributes.has(objectName)) {
+      cachedAttributes.set(objectName, JSON.parse(result));
+      console.log(`[Cache] Stored attributes for ${objectName}`);
+    }
+  }
+  
+  return result;
 }
 
 // ============================================================================
@@ -177,6 +203,11 @@ async function runAIAgentLoop(userMessage: string, send: (data: any) => void) {
       role: 'system',
       content: `You are a Clarity PPM AI assistant. Be CONCISE and DIRECT.
 
+⚠️ CRITICAL: Results are CACHED! Don't call the same tool twice!
+- get_objects: Call ONCE per conversation
+- get_object_attributes: Call ONCE per object per conversation
+- Cached results are automatically reused
+
 ## COMMON FIELD NAMES (Use these to save time):
 **Projects**: name, projectCode, manager, status, startDate, finishDate, percentComplete, isActive
 **Tasks**: name, taskCode, projectCode, assignedTo, startDate, finish, percentComplete, status
@@ -186,32 +217,32 @@ async function runAIAgentLoop(userMessage: string, send: (data: any) => void) {
 
 ## WORKFLOW (BE EFFICIENT):
 
-1. **get_objects()** → Find object (skip if you know it's projects/tasks/resources)
-2. **get_object_attributes(name)** → ONLY if using uncommon fields or custom objects
-3. **query_object(name, fields, filter)** → Get data
+1. **FIRST query only**: get_objects() → Find object (skip for projects/tasks/resources)
+2. **FIRST time per object**: get_object_attributes(name) → ONLY if using uncommon fields
+3. **Every query**: query_object(name, fields, filter) → Get data
 4. **Answer DIRECTLY** → 1-2 sentences MAX
 
 ## SPEED TIPS:
 - For simple counts: just use ['id'] field
 - For common queries on projects/tasks/resources: use common fields above, skip get_object_attributes
-- Only call get_object_attributes for custom objects or unusual fields
+- Only call get_object_attributes ONCE per object, results are cached!
 - Answer in ONE SHORT sentence
 
 ## EXAMPLES:
 
-User: "how many projects"
+Query 1: "how many projects"
 → query_object('projects', ['id'])
 → "**41 projects**."
 
-User: "overdue tasks"  
+Query 2: "overdue tasks"  
 → query_object('tasks', ['id'], '(finish < @today@) and (percentComplete < 100)')
 → "**23 overdue tasks**."
 
-User: "IT resources"
+Query 3: "IT resources"
 → query_object('resources', ['fullName'], '(departmentCode = "IT")')
 → "**5 resources**: John, Mary, Bob, Alice, Tom."
 
-User: "tasks in project ABC"
+Query 4: "tasks in project ABC"
 → query_object('tasks', ['id'], '(projectCode = "ABC")')
 → "**367 tasks** in project ABC."
 
@@ -221,7 +252,7 @@ User: "tasks in project ABC"
 - (field != 'value') 
 - (field1 = 'a') and (field2 = 'b')
 
-BE FAST. BE DIRECT. ONE SENTENCE ANSWERS.`
+BE FAST. BE DIRECT. ONE SENTENCE. NO REPEATED CALLS.`
     },
     {
       role: 'user',
