@@ -716,6 +716,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    // Ensure args is defined
+    if (!args) {
+      throw new Error('No arguments provided');
+    }
+
     let result: string;
 
     switch (name) {
