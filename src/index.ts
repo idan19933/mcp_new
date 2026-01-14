@@ -84,6 +84,32 @@ const tools = [
         required: ['objectName', 'fields']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_project_tasks',
+      description: '🚀 Get tasks for a specific project using nested endpoint. MUCH FASTER than filtering! First get project ID, then call this with the ID.',
+      parameters: {
+        type: 'object',
+        properties: {
+          projectId: {
+            type: 'number',
+            description: 'Project internal ID (get from projects query first)'
+          },
+          fields: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Task fields to return (e.g., ["name", "status", "percentComplete"])'
+          },
+          filter: {
+            type: 'string',
+            description: 'Optional filter for tasks'
+          }
+        },
+        required: ['projectId', 'fields']
+      }
+    }
   }
 ];
 
@@ -119,6 +145,15 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
       }
       
       endpoint = `/ppm/rest/v1/describeAttributes?filter=(resourceName+%3D+%27${objectName}%27)`;
+      break;
+      
+    case 'get_project_tasks':
+      const { projectId, fields: taskFields, filter: taskFilter } = parsedArgs;
+      
+      // Use nested endpoint: /projects/{projectId}/tasks
+      const taskFieldsParam = taskFields.join(',');
+      const taskFilterParam = taskFilter ? `&filter=${encodeURIComponent(taskFilter)}` : '';
+      endpoint = `/ppm/rest/v1/projects/${projectId}/tasks?fields=${taskFieldsParam}${taskFilterParam}`;
       break;
       
     case 'query_object':
@@ -210,10 +245,15 @@ CRITICAL RULES:
 4. NEVER explain errors to user - just give best answer possible
 5. ONE SENTENCE MAX - no explanations!
 
-COMMON FIELDS (Try these first):
-**Tasks**: id, name, taskCode, start, finish, percentComplete, status, projectCode, investmentId
-**Projects**: id, name, projectCode, manager, status
-**Resources**: id, fullName, resourceCode, emailAddress
+COMMON FIELDS (These work - verified):
+**Tasks**: name, taskCode, start, finish, percentComplete, status, investmentId
+**Projects**: name, code, manager, status, investmentId
+**Resources**: fullName, resourceCode, emailAddress
+
+⚠️ FIELDS THAT DON'T WORK:
+- 'id' is SECURED on most objects - use 'name' or specific code fields instead
+- 'projectCode' doesn't exist on projects - use 'code' instead
+- 'taskCode' might be secured - use 'name' instead for counting
 
 FALLBACK STRATEGY:
 - Attempt 1: Try requested fields
@@ -226,54 +266,52 @@ OVERDUE TASKS STRATEGY:
 2. If fails: query_object('tasks', ['id'], '(percentComplete < 100)') 
 3. Answer with what you got: "X incomplete tasks (finish date not accessible)"
 
-🚨 MANDATORY FOR PROJECT FILTERING:
-NEVER filter tasks directly by project name/code - IT WILL FAIL!
-ALWAYS use this 2-step process:
+🚨 FOR TASKS IN A SPECIFIC PROJECT - USE get_project_tasks:
 
-Step 1: Get investmentId
-  query_object('projects', ['investmentId'], '(code = "PROJECT_NAME")')
-  Example result: {"investmentId": 5004001}
+Step 1: Get project ID  
+  query_object('projects', ['id'], '(code = "PROJECT_NAME")')
+  Example result: {"id": 5004001}
 
-Step 2: Use investmentId to filter tasks
-  query_object('tasks', ['id'], '(investmentId = 5004001)')
+Step 2: Use get_project_tasks with the ID
+  get_project_tasks(projectId: 5004001, fields: ['name'])
 
-🚨 THIS IS THE ONLY WAY TO FILTER TASKS BY PROJECT!
+This uses the nested endpoint: /projects/5004001/tasks
+🚨 THIS IS THE FASTEST AND MOST RELIABLE WAY!
 
-Example conversation:
+Example:
 User: "how many tasks in this_proj"
-You: query_object('projects', ['investmentId'], '(code = "this_proj")')
-     → Got investmentId: 5004001
-     query_object('tasks', ['id'], '(investmentId = 5004001)')
-     → "**367 tasks** in this_proj."
+Step 1: query_object('projects', ['id'], '(code = "this_proj")')
+        → Got id: 5004001
+Step 2: get_project_tasks(5004001, ['name'])
+        → "**367 tasks** in this_proj."
 
 EXAMPLES (FOLLOW EXACTLY):
 
 Simple count:
 User: "how many projects"
-→ query_object('projects', ['id'])
+→ query_object('projects', ['name'])
 → "**41 projects**."
 
-Project filtering (2 STEPS REQUIRED):
+Tasks in project (USE get_project_tasks):
 User: "tasks in this_proj"
-→ Step 1: query_object('projects', ['investmentId'], '(code = "this_proj")')
-   Result: investmentId = 5004001
-→ Step 2: query_object('tasks', ['id'], '(investmentId = 5004001)')
+→ Step 1: query_object('projects', ['id'], '(code = "this_proj")')
+   Result: id = 5004001
+→ Step 2: get_project_tasks(5004001, ['name'])
 → "**367 tasks** in this_proj."
 
-Distribution (2 STEPS REQUIRED):
+Distribution (USE get_project_tasks):
 User: "distribution of tasks in this_proj"
-→ Step 1: query_object('projects', ['investmentId'], '(code = "this_proj")')
-   Result: investmentId = 5004001  
-→ Step 2: query_object('tasks', ['status'], '(investmentId = 5004001)')
+→ Step 1: query_object('projects', ['id'], '(code = "this_proj")')
+   Result: id = 5004001  
+→ Step 2: get_project_tasks(5004001, ['status'])
 → "**367 tasks**: 354 Not Started, 4 Started, 9 Completed."
 
-Overdue with project filter (2 STEPS REQUIRED):
-User: "overdue tasks in this_proj"
-→ Step 1: query_object('projects', ['investmentId'], '(code = "this_proj")')
-   Result: investmentId = 5004001
-→ Step 2: Try: query_object('tasks', ['id'], '(investmentId = 5004001) and (finish < @today@)')
-   If fails: query_object('tasks', ['id'], '(investmentId = 5004001) and (percentComplete < 100)')
-→ "**367 incomplete tasks** in this_proj."
+Filtered tasks in project (USE get_project_tasks with filter):
+User: "started tasks in this_proj"
+→ Step 1: query_object('projects', ['id'], '(code = "this_proj")')
+   Result: id = 5004001
+→ Step 2: get_project_tasks(5004001, ['name'], '(status = "Started")')
+→ "**4 started tasks** in this_proj."
 
 Simple filter (no project):
 User: "IT resources"  
