@@ -170,7 +170,19 @@ async function handleToolCall(toolCall: any, send: (data: any) => void): Promise
       const objectPath = pluralMap[obj.toLowerCase()] || obj;
       
       const fieldsParam = fields.join(',');
-      const filterParam = filter ? `&filter=${encodeURIComponent(filter)}` : '';
+      
+      // Encode filter properly: (code = 'value') → (code+%3D+%27value%27)
+      let filterParam = '';
+      if (filter) {
+        // Replace spaces with +, = with %3D, quotes with %27
+        const encodedFilter = filter
+          .replace(/\s+/g, '+')
+          .replace(/=/g, '%3D')
+          .replace(/'/g, '%27')
+          .replace(/"/g, '%27'); // Convert double quotes to single quotes
+        filterParam = `&filter=${encodedFilter}`;
+      }
+      
       endpoint = `/ppm/rest/v1/${objectPath}?fields=${fieldsParam}${filterParam}`;
       break;
       
@@ -268,8 +280,9 @@ OVERDUE TASKS STRATEGY:
 
 🚨 FOR TASKS IN A SPECIFIC PROJECT - USE get_project_tasks:
 
-Step 1: Get project ID  
-  query_object('projects', ['id'], '(code = "PROJECT_NAME")')
+Step 1: Get project ID (⚠️ USE SINGLE QUOTES!)
+  query_object('projects', ['id'], "(code = 'PROJECT_NAME')")
+  ⚠️ CRITICAL: Use single quotes 'value' NOT double quotes "value"
   Example result: {"id": 5004001}
 
 Step 2: Use get_project_tasks with the ID
@@ -280,43 +293,48 @@ This uses the nested endpoint: /projects/5004001/tasks
 
 Example:
 User: "how many tasks in this_proj"
-Step 1: query_object('projects', ['id'], '(code = "this_proj")')
+Step 1: query_object('projects', ['id'], "(code = 'this_proj')")
         → Got id: 5004001
 Step 2: get_project_tasks(5004001, ['name'])
         → "**367 tasks** in this_proj."
 
-EXAMPLES (FOLLOW EXACTLY):
+EXAMPLES (FOLLOW EXACTLY - USE SINGLE QUOTES!):
 
 Simple count:
 User: "how many projects"
 → query_object('projects', ['name'])
 → "**41 projects**."
 
-Tasks in project (USE get_project_tasks):
+Tasks in project (⚠️ ALWAYS USE get_project_tasks):
 User: "tasks in this_proj"
-→ Step 1: query_object('projects', ['id'], '(code = "this_proj")')
+→ Step 1: query_object('projects', ['id'], "(code = 'this_proj')")
    Result: id = 5004001
 → Step 2: get_project_tasks(5004001, ['name'])
 → "**367 tasks** in this_proj."
 
-Distribution (USE get_project_tasks):
+Distribution (⚠️ USE get_project_tasks):
 User: "distribution of tasks in this_proj"
-→ Step 1: query_object('projects', ['id'], '(code = "this_proj")')
+→ Step 1: query_object('projects', ['id'], "(code = 'this_proj')")
    Result: id = 5004001  
 → Step 2: get_project_tasks(5004001, ['status'])
 → "**367 tasks**: 354 Not Started, 4 Started, 9 Completed."
 
-Filtered tasks in project (USE get_project_tasks with filter):
+Filtered tasks in project:
 User: "started tasks in this_proj"
-→ Step 1: query_object('projects', ['id'], '(code = "this_proj")')
+→ Step 1: query_object('projects', ['id'], "(code = 'this_proj')")
    Result: id = 5004001
-→ Step 2: get_project_tasks(5004001, ['name'], '(status = "Started")')
+→ Step 2: get_project_tasks(5004001, ['name'], "(status = 'Started')")
 → "**4 started tasks** in this_proj."
 
 Simple filter (no project):
 User: "IT resources"  
-→ query_object('resources', ['fullName'], '(departmentCode = "IT")')
+→ query_object('resources', ['fullName'], "(departmentCode = 'IT')")
 → "**5 resources** in IT."
+
+⚠️ CRITICAL RULES:
+1. ALWAYS use single quotes in filters: (field = 'value')
+2. For ANY query about tasks in a project → USE get_project_tasks
+3. Never give generic answers like "898 tasks total" when user asks about specific project
 
 RULES:
 - ONE SENTENCE
