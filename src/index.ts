@@ -1,29 +1,16 @@
-#!/usr/bin/env node
-
 /**
- * Clarity PPM MCP Server
+ * Clarity PPM HTTP Server
+ * Version 2.0.0 - Complete Edition
  * 
- * A comprehensive Model Context Protocol server for CA Clarity PPM REST API
- * Provides full access to projects, tasks, resources, financials, timesheets, and more
- * 
- * Features:
- * - Complete CRUD operations for all Clarity objects
- * - Smart caching for metadata and attributes
- * - Nested endpoint support (e.g., /projects/{id}/tasks)
- * - Advanced filtering with NSQL syntax
- * - Lookup value resolution
- * - Custom object support
- * 
- * @version 1.0.0
+ * Full-featured HTTP wrapper with all 17 tools from MCP server
+ * For Railway deployment with browser extension support
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  Tool,
-} from '@modelcontextprotocol/sdk/types.js';
+import express from 'express';
+import cors from 'cors';
+
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 // ============================================================================
 // CONFIGURATION
@@ -37,7 +24,6 @@ interface ClarityConfig {
   authToken?: string;
 }
 
-// Load from environment
 const config: ClarityConfig = {
   baseUrl: process.env.CLARITY_BASE_URL || 'http://localhost:8080',
   username: process.env.CLARITY_USERNAME,
@@ -47,311 +33,25 @@ const config: ClarityConfig = {
 };
 
 // ============================================================================
+// MIDDLEWARE
+// ============================================================================
+
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+
+// Logging middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
+// ============================================================================
 // CACHING
 // ============================================================================
 
 const cachedObjects = new Map<string, any>();
 const cachedAttributes = new Map<string, any>();
 const cachedLookups = new Map<string, any>();
-
-// ============================================================================
-// TOOLS DEFINITION
-// ============================================================================
-
-const tools: Tool[] = [
-  // Discovery Tools
-  {
-    name: 'get_objects',
-    description: 'Discover all available Clarity objects (projects, tasks, resources, ideas, custom objects, etc.). Use this first to see what objects exist in the system.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'get_object_attributes',
-    description: 'Get complete schema for an object including all field names, types, and constraints. Returns exact field names that must be used in queries.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        objectName: {
-          type: 'string',
-          description: 'Object name from get_objects (e.g., "projects", "tasks", "resources")',
-        },
-      },
-      required: ['objectName'],
-    },
-  },
-
-  // Query Tools
-  {
-    name: 'query_object',
-    description: 'Query data from any Clarity object with optional filtering. Supports NSQL filter syntax.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        objectName: {
-          type: 'string',
-          description: 'Object name (plural form: "projects", "tasks", etc.)',
-        },
-        fields: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Field names to return. Use exact names from get_object_attributes.',
-        },
-        filter: {
-          type: 'string',
-          description: 'NSQL filter. Examples: (status = \'Active\'), (startDate > \'2024-01-01\')',
-        },
-        limit: {
-          type: 'number',
-          description: 'Max records to return (1-200, default 25)',
-        },
-        offset: {
-          type: 'number',
-          description: 'Starting record number for pagination',
-        },
-        sort: {
-          type: 'string',
-          description: 'Sort order. Examples: "name", "code desc"',
-        },
-      },
-      required: ['objectName', 'fields'],
-    },
-  },
-
-  // Nested Endpoint Tools
-  {
-    name: 'get_project_tasks',
-    description: 'Get tasks for a specific project using optimized nested endpoint. Faster and more reliable than filtering.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        projectId: {
-          type: 'number',
-          description: 'Project internal ID (get from projects query first)',
-        },
-        fields: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Task fields to return',
-        },
-        filter: {
-          type: 'string',
-          description: 'Optional NSQL filter for tasks',
-        },
-        limit: {
-          type: 'number',
-          description: 'Max records (1-200)',
-        },
-      },
-      required: ['projectId', 'fields'],
-    },
-  },
-  {
-    name: 'get_project_teams',
-    description: 'Get team members for a specific project',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        projectId: { type: 'number' },
-        fields: { type: 'array', items: { type: 'string' } },
-        filter: { type: 'string' },
-      },
-      required: ['projectId', 'fields'],
-    },
-  },
-  {
-    name: 'get_task_assignments',
-    description: 'Get assignments for a specific task',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        projectId: { type: 'number' },
-        taskId: { type: 'number' },
-        fields: { type: 'array', items: { type: 'string' } },
-      },
-      required: ['projectId', 'taskId', 'fields'],
-    },
-  },
-
-  // Lookup Tools
-  {
-    name: 'get_lookup_values',
-    description: 'Get values for a lookup field (dropdown values)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        lookupType: {
-          type: 'string',
-          description: 'Lookup type code (e.g., "INVESTMENT_OBJ_STATUS", "PRJ_PERCENT_CALC_MODE")',
-        },
-        filter: {
-          type: 'string',
-          description: 'Filter by code or id. Example: (code = \'ACTIVE\')',
-        },
-      },
-      required: ['lookupType'],
-    },
-  },
-
-  // Create/Update/Delete Tools
-  {
-    name: 'create_object',
-    description: 'Create a new object instance (project, task, resource, etc.)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        objectName: { type: 'string' },
-        data: {
-          type: 'object',
-          description: 'Object data with field values',
-        },
-        parentId: {
-          type: 'number',
-          description: 'Parent ID for nested objects (e.g., projectId for tasks)',
-        },
-      },
-      required: ['objectName', 'data'],
-    },
-  },
-  {
-    name: 'update_object',
-    description: 'Update an existing object (partial update - PATCH)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        objectName: { type: 'string' },
-        objectId: { type: 'number' },
-        data: { type: 'object' },
-        parentId: { type: 'number' },
-      },
-      required: ['objectName', 'objectId', 'data'],
-    },
-  },
-  {
-    name: 'delete_object',
-    description: 'Delete an object instance',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        objectName: { type: 'string' },
-        objectId: { type: 'number' },
-        parentId: { type: 'number' },
-      },
-      required: ['objectName', 'objectId'],
-    },
-  },
-
-  // Timesheet Tools
-  {
-    name: 'get_timesheets',
-    description: 'Query timesheets with filtering',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        fields: { type: 'array', items: { type: 'string' } },
-        filter: { type: 'string' },
-        limit: { type: 'number' },
-      },
-      required: ['fields'],
-    },
-  },
-  {
-    name: 'get_timesheet_entries',
-    description: 'Get time entries for a specific timesheet',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        timesheetId: { type: 'number' },
-        fields: { type: 'array', items: { type: 'string' } },
-      },
-      required: ['timesheetId', 'fields'],
-    },
-  },
-
-  // Financial Tools
-  {
-    name: 'get_cost_plans',
-    description: 'Query cost/budget plans',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        fields: { type: 'array', items: { type: 'string' } },
-        filter: { type: 'string' },
-      },
-      required: ['fields'],
-    },
-  },
-  {
-    name: 'get_actual_transactions',
-    description: 'Query actual financial transactions',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        fields: { type: 'array', items: { type: 'string' } },
-        filter: { type: 'string' },
-      },
-      required: ['fields'],
-    },
-  },
-
-  // Roadmap Tools
-  {
-    name: 'get_roadmaps',
-    description: 'Query roadmaps',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        fields: { type: 'array', items: { type: 'string' } },
-        filter: { type: 'string' },
-      },
-      required: ['fields'],
-    },
-  },
-  {
-    name: 'get_roadmap_items',
-    description: 'Get items for a specific roadmap',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        roadmapId: { type: 'number' },
-        fields: { type: 'array', items: { type: 'string' } },
-      },
-      required: ['roadmapId', 'fields'],
-    },
-  },
-
-  // Advanced Query Tool
-  {
-    name: 'execute_custom_query',
-    description: 'Execute a custom API request with full control over endpoint, method, headers, and body',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        endpoint: {
-          type: 'string',
-          description: 'API endpoint path (e.g., "/projects" or "/projects/5004001/tasks")',
-        },
-        method: {
-          type: 'string',
-          enum: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
-          description: 'HTTP method',
-        },
-        queryParams: {
-          type: 'object',
-          description: 'Query parameters as key-value pairs',
-        },
-        body: {
-          type: 'object',
-          description: 'Request body for POST/PATCH/PUT',
-        },
-      },
-      required: ['endpoint', 'method'],
-    },
-  },
-];
 
 // ============================================================================
 // HTTP CLIENT
@@ -365,14 +65,12 @@ async function makeRequest(
 ): Promise<any> {
   const url = `${config.baseUrl}/ppm/rest/v1${endpoint}`;
 
-  // Build headers
   const requestHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
     ...headers,
   };
 
-  // Add authentication
   if (config.authToken) {
     requestHeaders['authtoken'] = config.authToken;
   } else if (config.username && config.password) {
@@ -391,7 +89,7 @@ async function makeRequest(
     options.body = JSON.stringify(body);
   }
 
-  console.error(`[Request] ${method} ${url}`);
+  console.log(`[Clarity API] ${method} ${url}`);
 
   const response = await fetch(url, options);
   const text = await response.text();
@@ -404,17 +102,11 @@ async function makeRequest(
 }
 
 // ============================================================================
-// URL ENCODING HELPER
+// HELPERS
 // ============================================================================
 
 function encodeFilter(filter: string): string {
   if (!filter) return '';
-  
-  // Custom encoding for Clarity NSQL:
-  // - Replace spaces with +
-  // - Replace = with %3D
-  // - Replace single quotes with %27
-  // - Convert double quotes to single quotes
   return filter
     .replace(/\s+/g, '+')
     .replace(/=/g, '%3D')
@@ -425,10 +117,6 @@ function encodeFilter(filter: string): string {
     .replace(/\(/g, '%28')
     .replace(/\)/g, '%29');
 }
-
-// ============================================================================
-// PLURALIZATION
-// ============================================================================
 
 const pluralMap: Record<string, string> = {
   project: 'projects',
@@ -445,6 +133,8 @@ const pluralMap: Record<string, string> = {
   baseline: 'baselines',
   roadmap: 'roadmaps',
   scenario: 'scenarios',
+  costPlan: 'costPlans',
+  benefitPlan: 'benefitPlans',
 };
 
 function pluralize(objectName: string): string {
@@ -456,41 +146,37 @@ function pluralize(objectName: string): string {
 // TOOL HANDLERS
 // ============================================================================
 
-async function handleGetObjects(): Promise<string> {
-  // Check cache
+async function handleGetObjects(): Promise<any> {
   if (cachedObjects.size > 0) {
-    console.error('[Cache] Using cached objects list');
-    return JSON.stringify(Array.from(cachedObjects.values()));
+    console.log('[Cache] Using cached objects list');
+    return Array.from(cachedObjects.values());
   }
 
   const endpoint = `/describe?filter=((extensions+in+('inv')))`;
   const result = await makeRequest(endpoint);
 
-  // Cache results
   if (result._results) {
     result._results.forEach((obj: any) => {
       cachedObjects.set(obj.resourceName, obj);
     });
   }
 
-  return JSON.stringify(result);
+  return result;
 }
 
-async function handleGetObjectAttributes(objectName: string): Promise<string> {
-  // Check cache
+async function handleGetObjectAttributes(objectName: string): Promise<any> {
   if (cachedAttributes.has(objectName)) {
-    console.error(`[Cache] Using cached attributes for ${objectName}`);
-    return JSON.stringify(cachedAttributes.get(objectName));
+    console.log(`[Cache] Using cached attributes for ${objectName}`);
+    return cachedAttributes.get(objectName);
   }
 
   const endpoint = `/describeAttributes?filter=(resourceName+%3D+%27${objectName}%27)`;
   const result = await makeRequest(endpoint);
 
-  // Cache result
   cachedAttributes.set(objectName, result);
-  console.error(`[Cache] Stored attributes for ${objectName}`);
+  console.log(`[Cache] Stored attributes for ${objectName}`);
 
-  return JSON.stringify(result);
+  return result;
 }
 
 async function handleQueryObject(args: {
@@ -500,27 +186,18 @@ async function handleQueryObject(args: {
   limit?: number;
   offset?: number;
   sort?: string;
-}): Promise<string> {
+}): Promise<any> {
   const objectPath = pluralize(args.objectName);
   const fieldsParam = args.fields.join(',');
 
-  let endpoint = `/ppm/rest/v1/${objectPath}?fields=${fieldsParam}`;
+  let endpoint = `/${objectPath}?fields=${fieldsParam}`;
 
-  if (args.filter) {
-    endpoint += `&filter=${encodeFilter(args.filter)}`;
-  }
-  if (args.limit) {
-    endpoint += `&limit=${args.limit}`;
-  }
-  if (args.offset) {
-    endpoint += `&offset=${args.offset}`;
-  }
-  if (args.sort) {
-    endpoint += `&sort=${args.sort}`;
-  }
+  if (args.filter) endpoint += `&filter=${encodeFilter(args.filter)}`;
+  if (args.limit) endpoint += `&limit=${args.limit}`;
+  if (args.offset) endpoint += `&offset=${args.offset}`;
+  if (args.sort) endpoint += `&sort=${args.sort}`;
 
-  const result = await makeRequest(endpoint);
-  return JSON.stringify(result);
+  return await makeRequest(endpoint);
 }
 
 async function handleGetProjectTasks(args: {
@@ -528,90 +205,72 @@ async function handleGetProjectTasks(args: {
   fields: string[];
   filter?: string;
   limit?: number;
-}): Promise<string> {
+}): Promise<any> {
   const fieldsParam = args.fields.join(',');
   let endpoint = `/projects/${args.projectId}/tasks?fields=${fieldsParam}`;
 
-  if (args.filter) {
-    endpoint += `&filter=${encodeFilter(args.filter)}`;
-  }
-  if (args.limit) {
-    endpoint += `&limit=${args.limit}`;
-  }
+  if (args.filter) endpoint += `&filter=${encodeFilter(args.filter)}`;
+  if (args.limit) endpoint += `&limit=${args.limit}`;
 
-  const result = await makeRequest(endpoint);
-  return JSON.stringify(result);
+  return await makeRequest(endpoint);
 }
 
 async function handleGetProjectTeams(args: {
   projectId: number;
   fields: string[];
   filter?: string;
-}): Promise<string> {
+}): Promise<any> {
   const fieldsParam = args.fields.join(',');
   let endpoint = `/projects/${args.projectId}/teams?fields=${fieldsParam}`;
 
-  if (args.filter) {
-    endpoint += `&filter=${encodeFilter(args.filter)}`;
-  }
+  if (args.filter) endpoint += `&filter=${encodeFilter(args.filter)}`;
 
-  const result = await makeRequest(endpoint);
-  return JSON.stringify(result);
+  return await makeRequest(endpoint);
 }
 
 async function handleGetTaskAssignments(args: {
   projectId: number;
   taskId: number;
   fields: string[];
-}): Promise<string> {
+}): Promise<any> {
   const fieldsParam = args.fields.join(',');
   const endpoint = `/projects/${args.projectId}/tasks/${args.taskId}/assignments?fields=${fieldsParam}`;
 
-  const result = await makeRequest(endpoint);
-  return JSON.stringify(result);
+  return await makeRequest(endpoint);
 }
 
 async function handleGetLookupValues(args: {
   lookupType: string;
   filter?: string;
-}): Promise<string> {
-  // Check cache
+}): Promise<any> {
   const cacheKey = `${args.lookupType}:${args.filter || 'all'}`;
   if (cachedLookups.has(cacheKey)) {
-    console.error(`[Cache] Using cached lookup ${cacheKey}`);
-    return JSON.stringify(cachedLookups.get(cacheKey));
+    console.log(`[Cache] Using cached lookup ${cacheKey}`);
+    return cachedLookups.get(cacheKey);
   }
 
   let endpoint = `/lookups/${args.lookupType}/lookupValues`;
-  
-  if (args.filter) {
-    endpoint += `?filter=${encodeFilter(args.filter)}`;
-  }
+  if (args.filter) endpoint += `?filter=${encodeFilter(args.filter)}`;
 
   const result = await makeRequest(endpoint);
-
-  // Cache result
   cachedLookups.set(cacheKey, result);
 
-  return JSON.stringify(result);
+  return result;
 }
 
 async function handleCreateObject(args: {
   objectName: string;
   data: any;
   parentId?: number;
-}): Promise<string> {
+}): Promise<any> {
   const objectPath = pluralize(args.objectName);
   let endpoint = `/${objectPath}`;
 
   if (args.parentId) {
-    // Nested creation - need parent type
-    // This is a simplified version; real implementation would need parent type mapping
     endpoint = `/projects/${args.parentId}/${objectPath}`;
   }
 
-  const result = await makeRequest(endpoint, 'POST', args.data);
-  return JSON.stringify(result);
+  return await makeRequest(endpoint, 'POST', args.data);
 }
 
 async function handleUpdateObject(args: {
@@ -619,7 +278,7 @@ async function handleUpdateObject(args: {
   objectId: number;
   data: any;
   parentId?: number;
-}): Promise<string> {
+}): Promise<any> {
   const objectPath = pluralize(args.objectName);
   let endpoint = `/${objectPath}/${args.objectId}`;
 
@@ -627,15 +286,14 @@ async function handleUpdateObject(args: {
     endpoint = `/projects/${args.parentId}/${objectPath}/${args.objectId}`;
   }
 
-  const result = await makeRequest(endpoint, 'PATCH', args.data);
-  return JSON.stringify(result);
+  return await makeRequest(endpoint, 'PATCH', args.data);
 }
 
 async function handleDeleteObject(args: {
   objectName: string;
   objectId: number;
   parentId?: number;
-}): Promise<string> {
+}): Promise<any> {
   const objectPath = pluralize(args.objectName);
   let endpoint = `/${objectPath}/${args.objectId}`;
 
@@ -644,14 +302,14 @@ async function handleDeleteObject(args: {
   }
 
   await makeRequest(endpoint, 'DELETE');
-  return JSON.stringify({ success: true, deleted: args.objectId });
+  return { success: true, deleted: args.objectId };
 }
 
 async function handleGetTimesheets(args: {
   fields: string[];
   filter?: string;
   limit?: number;
-}): Promise<string> {
+}): Promise<any> {
   return handleQueryObject({
     objectName: 'timesheets',
     fields: args.fields,
@@ -663,11 +321,10 @@ async function handleGetTimesheets(args: {
 async function handleGetTimesheetEntries(args: {
   timesheetId: number;
   fields: string[];
-}): Promise<string> {
+}): Promise<any> {
   const fieldsParam = args.fields.join(',');
   const endpoint = `/timesheets/${args.timesheetId}/timeEntries?fields=${fieldsParam}`;
-  const result = await makeRequest(endpoint);
-  return JSON.stringify(result);
+  return await makeRequest(endpoint);
 }
 
 async function handleExecuteCustomQuery(args: {
@@ -675,7 +332,7 @@ async function handleExecuteCustomQuery(args: {
   method: string;
   queryParams?: Record<string, any>;
   body?: any;
-}): Promise<string> {
+}): Promise<any> {
   let endpoint = args.endpoint;
 
   if (args.queryParams) {
@@ -686,135 +343,365 @@ async function handleExecuteCustomQuery(args: {
     endpoint += `?${params.toString()}`;
   }
 
-  const result = await makeRequest(endpoint, args.method, args.body);
-  return JSON.stringify(result);
+  return await makeRequest(endpoint, args.method, args.body);
 }
 
 // ============================================================================
-// MCP SERVER
+// HTTP ROUTES - All 17 Tools
 // ============================================================================
 
-const server = new Server(
-  {
-    name: 'clarity-ppm-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
-
-// List available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools };
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    version: '2.0.0',
+    tools: 17,
+    config: {
+      baseUrl: config.baseUrl,
+      hasAuth: !!(config.authToken || config.username || config.sessionId)
+    }
+  });
 });
 
-// Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
+// Tool 1: Get Objects
+app.get('/api/tools/get_objects', async (req, res) => {
   try {
-    // Ensure args is defined
-    if (!args) {
-      throw new Error('No arguments provided');
+    const result = await handleGetObjects();
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 2: Get Object Attributes
+app.get('/api/tools/get_object_attributes', async (req, res) => {
+  try {
+    const { objectName } = req.query;
+    if (!objectName) {
+      return res.status(400).json({ error: 'objectName is required' });
     }
+    const result = await handleGetObjectAttributes(objectName as string);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
 
-    let result: string;
+// Tool 3: Query Object
+app.post('/api/tools/query_object', async (req, res) => {
+  try {
+    const result = await handleQueryObject(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
 
-    switch (name) {
+// Tool 4: Get Project Tasks
+app.post('/api/tools/get_project_tasks', async (req, res) => {
+  try {
+    const result = await handleGetProjectTasks(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 5: Get Project Teams
+app.post('/api/tools/get_project_teams', async (req, res) => {
+  try {
+    const result = await handleGetProjectTeams(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 6: Get Task Assignments
+app.post('/api/tools/get_task_assignments', async (req, res) => {
+  try {
+    const result = await handleGetTaskAssignments(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 7: Get Lookup Values
+app.post('/api/tools/get_lookup_values', async (req, res) => {
+  try {
+    const result = await handleGetLookupValues(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 8: Create Object
+app.post('/api/tools/create_object', async (req, res) => {
+  try {
+    const result = await handleCreateObject(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 9: Update Object
+app.post('/api/tools/update_object', async (req, res) => {
+  try {
+    const result = await handleUpdateObject(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 10: Delete Object
+app.post('/api/tools/delete_object', async (req, res) => {
+  try {
+    const result = await handleDeleteObject(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 11: Get Timesheets
+app.post('/api/tools/get_timesheets', async (req, res) => {
+  try {
+    const result = await handleGetTimesheets(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 12: Get Timesheet Entries
+app.post('/api/tools/get_timesheet_entries', async (req, res) => {
+  try {
+    const result = await handleGetTimesheetEntries(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 13: Get Cost Plans
+app.post('/api/tools/get_cost_plans', async (req, res) => {
+  try {
+    const result = await handleQueryObject({ 
+      objectName: 'costPlans', 
+      ...req.body 
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 14: Get Actual Transactions
+app.post('/api/tools/get_actual_transactions', async (req, res) => {
+  try {
+    const result = await handleQueryObject({ 
+      objectName: 'actualTransactions', 
+      ...req.body 
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 15: Get Roadmaps
+app.post('/api/tools/get_roadmaps', async (req, res) => {
+  try {
+    const result = await handleQueryObject({ 
+      objectName: 'roadmaps', 
+      ...req.body 
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 16: Get Roadmap Items
+app.post('/api/tools/get_roadmap_items', async (req, res) => {
+  try {
+    const result = await handleGetProjectTasks(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// Tool 17: Execute Custom Query
+app.post('/api/tools/execute_custom_query', async (req, res) => {
+  try {
+    const result = await handleExecuteCustomQuery(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// ============================================================================
+// UNIFIED TOOL ENDPOINT (for easier client integration)
+// ============================================================================
+
+app.post('/api/tool', async (req, res) => {
+  try {
+    const { tool, args } = req.body;
+    
+    let result: any;
+
+    switch (tool) {
       case 'get_objects':
         result = await handleGetObjects();
         break;
-
       case 'get_object_attributes':
-        result = await handleGetObjectAttributes(args.objectName as string);
+        result = await handleGetObjectAttributes(args.objectName);
         break;
-
       case 'query_object':
-        result = await handleQueryObject(args as any);
+        result = await handleQueryObject(args);
         break;
-
       case 'get_project_tasks':
-        result = await handleGetProjectTasks(args as any);
+        result = await handleGetProjectTasks(args);
         break;
-
       case 'get_project_teams':
-        result = await handleGetProjectTeams(args as any);
+        result = await handleGetProjectTeams(args);
         break;
-
       case 'get_task_assignments':
-        result = await handleGetTaskAssignments(args as any);
+        result = await handleGetTaskAssignments(args);
         break;
-
       case 'get_lookup_values':
-        result = await handleGetLookupValues(args as any);
+        result = await handleGetLookupValues(args);
         break;
-
       case 'create_object':
-        result = await handleCreateObject(args as any);
+        result = await handleCreateObject(args);
         break;
-
       case 'update_object':
-        result = await handleUpdateObject(args as any);
+        result = await handleUpdateObject(args);
         break;
-
       case 'delete_object':
-        result = await handleDeleteObject(args as any);
+        result = await handleDeleteObject(args);
         break;
-
       case 'get_timesheets':
-        result = await handleGetTimesheets(args as any);
+        result = await handleGetTimesheets(args);
         break;
-
       case 'get_timesheet_entries':
-        result = await handleGetTimesheetEntries(args as any);
+        result = await handleGetTimesheetEntries(args);
         break;
-
       case 'get_cost_plans':
-        result = await handleQueryObject({ objectName: 'costPlans', ...args as any });
+        result = await handleQueryObject({ objectName: 'costPlans', ...args });
         break;
-
       case 'get_actual_transactions':
-        result = await handleQueryObject({ objectName: 'actualTransactions', ...args as any });
+        result = await handleQueryObject({ objectName: 'actualTransactions', ...args });
         break;
-
       case 'get_roadmaps':
-        result = await handleQueryObject({ objectName: 'roadmaps', ...args as any });
+        result = await handleQueryObject({ objectName: 'roadmaps', ...args });
         break;
-
       case 'get_roadmap_items':
-        result = await handleGetProjectTasks(args as any); // Similar pattern
+        result = await handleGetProjectTasks(args);
         break;
-
       case 'execute_custom_query':
-        result = await handleExecuteCustomQuery(args as any);
+        result = await handleExecuteCustomQuery(args);
         break;
-
       default:
-        throw new Error(`Unknown tool: ${name}`);
+        return res.status(400).json({ error: `Unknown tool: ${tool}` });
     }
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: result,
-        },
-      ],
-    };
+    res.json(result);
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ error: errorMessage }),
-        },
-      ],
-      isError: true,
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// ============================================================================
+// LEGACY COMPATIBILITY ROUTES (for v20-v34 extension)
+// ============================================================================
+
+app.get('/api/objects', async (req, res) => {
+  try {
+    const result = await handleGetObjects();
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+app.get('/api/objects/:objectName/attributes', async (req, res) => {
+  try {
+    const result = await handleGetObjectAttributes(req.params.objectName);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post('/api/query', async (req, res) => {
+  try {
+    const result = await handleQueryObject(req.body);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
+});
+
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('[Error]', err);
+  res.status(500).json({ 
+    error: err.message || 'Internal server error',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ============================================================================
+// CHAT ENDPOINT (for browser extension)
+// ============================================================================
+
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message, conversationHistory } = req.body;
+    
+    // Simple echo for testing - replace with actual AI logic later
+    const response = {
+      success: true,
+      reply: `Received: ${message}`,
+      timestamp: new Date().toISOString(),
+      tools_available: 17
     };
+    
+    res.json(response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ error: message });
   }
 });
 
@@ -822,13 +709,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // START SERVER
 // ============================================================================
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error('Clarity PPM MCP Server running on stdio');
-}
+const HOST = '0.0.0.0'; // Important: bind to all interfaces for Railway
 
-main().catch((error) => {
-  console.error('Fatal error:', error);
-  process.exit(1);
+app.listen(PORT, HOST, () => {
+  console.log('='.repeat(70));
+  console.log(`🚀 Clarity PPM HTTP Server v2.0.0`);
+  console.log(`📡 Listening on ${HOST}:${PORT}`);
+  console.log(`🔧 Base URL: ${config.baseUrl}`);
+  console.log(`🔐 Auth: ${config.authToken ? 'Token' : config.username ? 'Basic' : 'Session'}`);
+  console.log(`✅ All 17 tools available`);
+  console.log('='.repeat(70));
+  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Chat endpoint: POST http://localhost:${PORT}/api/chat`);
+  console.log(`Unified tool: POST http://localhost:${PORT}/api/tool`);
+  console.log('='.repeat(70));
 });
