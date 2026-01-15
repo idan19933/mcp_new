@@ -89,7 +89,8 @@ async function makeRequest(
     const auth = Buffer.from(`${config.username}:${config.password}`).toString('base64');
     requestHeaders['Authorization'] = `Basic ${auth}`;
   } else if (config.sessionId) {
-    requestHeaders['Cookie'] = `sessionId=${config.sessionId}`;
+    // sessionId might be entire cookie string from browser
+    requestHeaders['Cookie'] = config.sessionId;
   }
 
   const options: RequestInit = {
@@ -709,7 +710,7 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 });
 
 // ============================================================================
-// AI AGENT - Smart Query Processing
+// AI AGENT - Smart Query Processing with Claude API
 // ============================================================================
 
 interface QueryIntent {
@@ -722,92 +723,100 @@ interface QueryIntent {
   limit?: number;
 }
 
-function analyzeIntent(message: string): QueryIntent {
+async function analyzeIntentWithClaude(message: string, conversationHistory: any[]): Promise<any> {
+  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  
+  if (!ANTHROPIC_API_KEY) {
+    console.log('[AI Agent] No Anthropic API key, falling back to simple parsing');
+    return analyzeIntentSimple(message);
+  }
+
+  try {
+    const systemPrompt = `You are a Clarity PPM assistant. Analyze user queries and determine what Clarity API calls to make.
+
+Available tools:
+1. query_projects - Get projects list
+2. get_project_by_code - Find project by code (like "this_proj", "TEST01")
+3. get_project_tasks - Get tasks for a specific project (needs project ID)
+4. get_project_teams - Get team members for a project
+5. count_items - Count projects/tasks/resources
+
+When user asks about tasks in a project:
+- Step 1: Find the project by code using query_projects with filter
+- Step 2: Use the project ID to get tasks
+
+Respond with JSON:
+{
+  "steps": [
+    {"tool": "query_projects", "params": {"filter": "(code = 'PROJECT_CODE')"}, "reason": "Find project ID"},
+    {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1"}, "reason": "Get tasks"}
+  ],
+  "response_format": "List of tasks with completion %"
+}`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages: [
+          ...conversationHistory.slice(-3).map((msg: any) => ({
+            role: msg.role,
+            content: msg.content
+          })),
+          {
+            role: 'user',
+            content: `${systemPrompt}\n\nUser query: "${message}"\n\nProvide the execution plan as JSON.`
+          }
+        ]
+      })
+    });
+
+    const data = await response.json();
+    const content = data.content[0].text;
+    
+    // Extract JSON from response
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    
+    return analyzeIntentSimple(message);
+  } catch (error) {
+    console.error('[AI Agent] Claude API error:', error);
+    return analyzeIntentSimple(message);
+  }
+}
+
+function analyzeIntentSimple(message: string): QueryIntent {
   const lower = message.toLowerCase();
   
-  // Extract project code (e.g., "this_proj", "PROJ-001")
-  const projectCodeMatch = message.match(/\b([a-z][a-z0-9_-]{2,})\b/i);
-  const projectCode = projectCodeMatch ? projectCodeMatch[1] : undefined;
-  
-  // Extract numbers (for IDs)
-  const numberMatch = message.match(/\b\d{4,}\b/);
-  const numberId = numberMatch ? parseInt(numberMatch[0]) : undefined;
-  
-  // COUNT queries
-  if (lower.includes('how many') || lower.includes('count')) {
-    if (lower.includes('task')) {
-      return {
-        action: 'count_tasks',
-        projectCode: projectCode,
-        objectType: 'tasks',
-        fields: ['name']
-      };
-    } else if (lower.includes('project')) {
-      return {
-        action: 'count_projects',
-        objectType: 'projects',
-        fields: ['name']
-      };
-    } else if (lower.includes('resource')) {
-      return {
-        action: 'count',
-        objectType: 'resources',
-        fields: ['fullName']
-      };
-    }
-  }
-  
-  // LIST queries
-  if (lower.includes('list') || lower.includes('show') || lower.includes('get') || lower.includes('tasks in')) {
-    if (lower.includes('task')) {
-      return {
-        action: 'list_tasks',
-        projectCode: projectCode,
-        projectId: numberId,
-        objectType: 'tasks',
-        fields: ['name', 'status', 'percentComplete', 'start', 'finish'],
-        limit: 100
-      };
-    } else if (lower.includes('project')) {
-      const isActive = lower.includes('active');
-      return {
-        action: 'list_projects',
-        objectType: 'projects',
-        filter: isActive ? '(isActive = true)' : undefined,
-        fields: ['name', 'code', 'manager', 'status', 'percentComplete'],
-        limit: 50
-      };
-    } else if (lower.includes('team')) {
-      return {
-        action: 'list_teams',
-        projectCode: projectCode,
-        projectId: numberId,
-        objectType: 'teams',
-        fields: ['resourceId', 'role', 'allocationPercentage']
-      };
-    }
-  }
-  
-  // DETAILS queries
-  if (lower.includes('status') || lower.includes('info') || lower.includes('detail')) {
-    if (lower.includes('project') && projectCode) {
-      return {
-        action: 'project_details',
-        projectCode: projectCode,
-        objectType: 'projects',
-        fields: ['name', 'code', 'status', 'manager', 'percentComplete', 'scheduleStart', 'scheduleFinish']
-      };
-    }
-  }
-  
-  // HELP
-  if (lower.includes('help') || lower.includes('what can you')) {
+  // Simple fallback parsing
+  if (lower.includes('help')) {
     return { action: 'help' };
   }
   
-  // TOOLS
-  if (lower.includes('tool') || lower.includes('capabilities')) {
-    return { action: 'list_tools' };
+  if (lower.includes('active') && lower.includes('project')) {
+    return {
+      action: 'list_projects',
+      objectType: 'projects',
+      filter: '(isActive = true)',
+      fields: ['name', 'code', 'manager', 'status', 'percentComplete'],
+      limit: 50
+    };
+  }
+  
+  if (lower.includes('how many') && lower.includes('project')) {
+    return {
+      action: 'count_projects',
+      objectType: 'projects',
+      fields: ['name']
+    };
   }
   
   return { action: 'unknown' };
@@ -909,7 +918,7 @@ app.post('/api/chat', async (req, res) => {
     }
     if (claritySessionId) {
       config.sessionId = claritySessionId;
-      config.authToken = undefined; // Prefer session over token
+      config.authToken = undefined;
       config.username = undefined;
       config.password = undefined;
     }
@@ -917,168 +926,156 @@ app.post('/api/chat', async (req, res) => {
     console.log(`[Chat] Using Base URL: ${config.baseUrl}`);
     console.log(`[Chat] Using Auth: ${config.sessionId ? 'Session' : config.authToken ? 'Token' : 'Basic'}`);
     
-    // Analyze user intent
-    const intent = analyzeIntent(message);
-    console.log(`[Chat] Intent:`, intent);
+    // Use Claude API to analyze and execute
+    const plan = await analyzeIntentWithClaude(message, conversationHistory || []);
+    console.log(`[AI Agent] Execution plan:`, plan);
     
-    let response: any;
-    
-    // Handle special actions
-    if (intent.action === 'help') {
-      response = {
+    // Handle simple actions
+    if (plan.action === 'help') {
+      return res.json({
         success: true,
         reply: `🤖 **I can help you with Clarity PPM!**\n\n` +
                `📊 **Count things:**\n` +
                `- "How many projects?"\n` +
-               `- "How many tasks in this_proj?"\n` +
-               `- "Count resources"\n\n` +
+               `- "How many tasks in this_proj?"\n\n` +
                `📋 **List things:**\n` +
                `- "Show me active projects"\n` +
-               `- "List tasks in this_proj"\n` +
-               `- "Show team members in PROJ-001"\n\n` +
-               `🔍 **Get details:**\n` +
-               `- "Show project info for this_proj"\n` +
-               `- "Project status for PROJ-001"\n\n` +
-               `Just ask naturally! I understand project codes like "this_proj" or IDs like "5004001".`,
+               `- "List tasks in this_proj"\n\n` +
+               `Just ask naturally!`,
         timestamp: new Date().toISOString()
-      };
-      return res.json(response);
+      });
     }
     
-    if (intent.action === 'list_tools') {
-      response = {
+    if (plan.action === 'unknown') {
+      return res.json({
         success: true,
-        reply: `🛠️ **I have 17 powerful tools:**\n\n` +
-               `1. Query projects, tasks, resources\n` +
-               `2. Get project tasks (optimized)\n` +
-               `3. Get team members\n` +
-               `4. Get task assignments\n` +
-               `5. Get lookup values\n` +
-               `6. Create/Update/Delete objects\n` +
-               `7. Query timesheets\n` +
-               `8. Query financials\n` +
-               `9. Query roadmaps\n` +
-               `...and more!\n\n` +
-               `Just ask me naturally and I'll use the right tool!`,
+        reply: `🤔 I'm not sure how to help with that. Try "help" for examples.`,
         timestamp: new Date().toISOString()
-      };
-      return res.json(response);
+      });
     }
     
-    if (intent.action === 'unknown') {
-      response = {
+    // Execute multi-step plan
+    if (plan.steps && Array.isArray(plan.steps)) {
+      let context: any = {};
+      let finalResult: any = null;
+      
+      for (const step of plan.steps) {
+        console.log(`[AI Agent] Executing: ${step.tool} - ${step.reason}`);
+        
+        try {
+          // Replace placeholders with values from previous steps
+          let params = step.params;
+          if (typeof params === 'object') {
+            params = JSON.parse(JSON.stringify(params).replace(/"FROM_STEP_(\d+)"/g, (match, stepNum) => {
+              return JSON.stringify(context[`step${stepNum}`]);
+            }));
+          }
+          
+          // Execute the tool
+          let result: any;
+          
+          if (step.tool === 'query_projects') {
+            result = await handleQueryObject({
+              objectName: 'projects',
+              fields: params.fields || ['id', 'name', 'code'],
+              filter: params.filter,
+              limit: params.limit || 100
+            });
+          } else if (step.tool === 'get_project_tasks') {
+            const projectId = params.projectId || context.projectId;
+            result = await handleGetProjectTasks({
+              projectId: projectId,
+              fields: params.fields || ['name', 'status', 'percentComplete'],
+              limit: params.limit || 100
+            });
+          } else if (step.tool === 'get_project_teams') {
+            const projectId = params.projectId || context.projectId;
+            result = await handleGetProjectTeams({
+              projectId: projectId,
+              fields: params.fields || ['resourceId', 'role']
+            });
+          }
+          
+          // Store result in context
+          context[`step${plan.steps.indexOf(step) + 1}`] = result;
+          
+          // Extract useful values
+          if (result._results && result._results[0]) {
+            if (result._results[0]._internalId) {
+              context.projectId = result._results[0]._internalId;
+            }
+            if (result._results[0].id) {
+              context.projectId = context.projectId || result._results[0].id;
+            }
+          }
+          
+          finalResult = result;
+          
+        } catch (error) {
+          console.error(`[AI Agent] Step failed:`, error);
+          return res.json({
+            success: false,
+            reply: `❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+      
+      // Format final result
+      const count = finalResult._totalCount || finalResult._results?.length || 0;
+      let reply = `Found ${count} results.`;
+      
+      if (finalResult._results) {
+        const items = finalResult._results.slice(0, 15).map((item: any, i: number) => {
+          return `${i + 1}. ${item.name || item.code || 'Unnamed'}`;
+        }).join('\n');
+        
+        const more = count > 15 ? `\n\n_...and ${count - 15} more_` : '';
+        reply = `✅ Found **${count} items**:\n\n${items}${more}`;
+      }
+      
+      return res.json({
         success: true,
-        reply: `🤔 I'm not sure how to help with that.\n\n` +
-               `Try:\n` +
-               `- "How many tasks in this_proj?"\n` +
-               `- "Show me active projects"\n` +
-               `- "Help" for more examples`,
+        reply: reply,
+        data: finalResult,
         timestamp: new Date().toISOString()
-      };
-      return res.json(response);
+      });
     }
     
-    // Execute the appropriate tool
-    let data: any;
+    // Fallback to simple execution
+    const intent = plan as QueryIntent;
     
     try {
-      // For tasks in a specific project, we need to get the project ID first
-      if ((intent.action === 'count_tasks' || intent.action === 'list_tasks') && intent.projectCode) {
-        // Step 1: Find project by code
-        const projectResult = await handleQueryObject({
-          objectName: 'projects',
-          fields: ['id'],
-          filter: `(code = '${intent.projectCode}')`,
-          limit: 1
-        });
-        
-        if (!projectResult._results || projectResult._results.length === 0) {
-          response = {
-            success: false,
-            reply: `❌ Project **${intent.projectCode}** not found. Please check the project code.`,
-            timestamp: new Date().toISOString()
-          };
-          return res.json(response);
-        }
-        
-        const projectId = projectResult._results[0]._internalId || projectResult._results[0].id;
-        
-        // Step 2: Get tasks for that project
-        data = await handleGetProjectTasks({
-          projectId: projectId,
-          fields: intent.fields || ['name'],
-          limit: intent.limit || 100
-        });
-      }
-      // For teams in a specific project
-      else if (intent.action === 'list_teams' && intent.projectCode) {
-        // Step 1: Find project by code
-        const projectResult = await handleQueryObject({
-          objectName: 'projects',
-          fields: ['id'],
-          filter: `(code = '${intent.projectCode}')`,
-          limit: 1
-        });
-        
-        if (!projectResult._results || projectResult._results.length === 0) {
-          response = {
-            success: false,
-            reply: `❌ Project **${intent.projectCode}** not found.`,
-            timestamp: new Date().toISOString()
-          };
-          return res.json(response);
-        }
-        
-        const projectId = projectResult._results[0]._internalId || projectResult._results[0].id;
-        
-        // Step 2: Get teams
-        data = await handleGetProjectTeams({
-          projectId: projectId,
-          fields: intent.fields || ['resourceId']
-        });
-      }
-      // For project details by code
-      else if (intent.action === 'project_details' && intent.projectCode) {
-        data = await handleQueryObject({
-          objectName: 'projects',
-          fields: intent.fields || ['name', 'code'],
-          filter: `(code = '${intent.projectCode}')`,
-          limit: 1
-        });
-      }
-      // Generic queries
-      else if (intent.objectType) {
+      let data: any;
+      
+      if (intent.objectType) {
         data = await handleQueryObject({
           objectName: intent.objectType,
           fields: intent.fields || ['name'],
           filter: intent.filter,
           limit: intent.limit || 200
         });
-      }
-      else {
+      } else {
         throw new Error('No valid action determined');
       }
       
-      // Format the response
       const formattedReply = formatResponse(intent, data);
       
-      response = {
+      return res.json({
         success: true,
         reply: formattedReply,
         data: data,
         timestamp: new Date().toISOString()
-      };
+      });
       
     } catch (error) {
       console.error('[Chat] Error:', error);
-      response = {
+      return res.json({
         success: false,
         reply: `❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
         timestamp: new Date().toISOString()
-      };
+      });
     }
-    
-    res.json(response);
     
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
