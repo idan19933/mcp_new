@@ -35,6 +35,9 @@ const config: ClarityConfig = {
 // MIDDLEWARE
 // ============================================================================
 
+// Store request-specific Clarity config
+const requestConfigs = new Map();
+
 // Simple CORS middleware (no external dependency)
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -99,7 +102,8 @@ async function makeRequest(
   }
 
   console.log(`[Clarity API] ${method} ${url}`);
-  console.log(`[Clarity API] Auth: ${config.authToken ? 'Token' : config.username ? 'Basic' : 'Session'}`);
+  console.log(`[Clarity API] Using config.baseUrl: ${config.baseUrl}`);
+  console.log(`[Clarity API] Using config.sessionId: ${config.sessionId ? 'YES' : 'NO'}`);
 
   try {
     const response = await fetch(url, options);
@@ -107,7 +111,7 @@ async function makeRequest(
 
     if (!response.ok) {
       console.error(`[Clarity API] Error ${response.status}: ${text.substring(0, 200)}`);
-      throw new Error(`Clarity API returned ${response.status}. Check: 1) Base URL is correct (${config.baseUrl}), 2) Auth credentials are valid`);
+      throw new Error(`Clarity API returned ${response.status}. URL was: ${url}`);
     }
 
     return text ? JSON.parse(text) : null;
@@ -893,9 +897,25 @@ function formatResponse(intent: QueryIntent, data: any): string {
 
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, conversationHistory } = req.body;
+    const { message, conversationHistory, clarityBaseUrl, claritySessionId } = req.body;
     
     console.log(`[Chat] Received: "${message}"`);
+    console.log(`[Chat] Clarity URL: ${clarityBaseUrl || 'not provided'}`);
+    console.log(`[Chat] Session ID: ${claritySessionId ? 'provided' : 'not provided'}`);
+    
+    // Override config with dynamic values from extension
+    if (clarityBaseUrl) {
+      config.baseUrl = clarityBaseUrl;
+    }
+    if (claritySessionId) {
+      config.sessionId = claritySessionId;
+      config.authToken = undefined; // Prefer session over token
+      config.username = undefined;
+      config.password = undefined;
+    }
+    
+    console.log(`[Chat] Using Base URL: ${config.baseUrl}`);
+    console.log(`[Chat] Using Auth: ${config.sessionId ? 'Session' : config.authToken ? 'Token' : 'Basic'}`);
     
     // Analyze user intent
     const intent = analyzeIntent(message);
