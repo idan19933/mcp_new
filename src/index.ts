@@ -126,9 +126,18 @@ const CACHE_TTL = 1000 * 60 * 15; // 15 minutes
 function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, displayValue: string): string {
   const attribute = metadata.attributes.find(attr => attr.apiName === fieldName);
   
-  if (!attribute || !attribute.isLookup || !attribute.lookupValues) {
-    return displayValue; // Not a lookup field or no values available
+  if (!attribute || !attribute.isLookup) {
+    console.log(`[LookupResolver] ${fieldName} is not a lookup field`);
+    return displayValue; // Not a lookup field
   }
+  
+  if (!attribute.lookupValues || attribute.lookupValues.length === 0) {
+    console.warn(`[LookupResolver] No lookup values available for ${fieldName}. Metadata might not include them.`);
+    return displayValue; // No values available
+  }
+  
+  console.log(`[LookupResolver] Available values for ${fieldName}:`, 
+    JSON.stringify(attribute.lookupValues.map(lv => ({ code: lv.code, display: lv.displayValue })), null, 2));
   
   // Try exact match first (case-insensitive)
   const lowerDisplay = displayValue.toLowerCase();
@@ -137,7 +146,7 @@ function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, display
   );
   
   if (exactMatch) {
-    console.log(`[LookupResolver] Resolved '${displayValue}' -> '${exactMatch.code}' for ${fieldName}`);
+    console.log(`[LookupResolver] ✓ Resolved '${displayValue}' -> '${exactMatch.code}' for ${fieldName}`);
     return exactMatch.code;
   }
   
@@ -148,19 +157,19 @@ function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, display
   );
   
   if (partialMatch) {
-    console.log(`[LookupResolver] Resolved '${displayValue}' -> '${partialMatch.code}' for ${fieldName} (partial match)`);
+    console.log(`[LookupResolver] ✓ Resolved '${displayValue}' -> '${partialMatch.code}' for ${fieldName} (partial match)`);
     return partialMatch.code;
   }
   
   // Check if it's already a code
   const codeMatch = attribute.lookupValues.find(lv => lv.code === displayValue);
   if (codeMatch) {
-    console.log(`[LookupResolver] '${displayValue}' is already a valid code for ${fieldName}`);
+    console.log(`[LookupResolver] ✓ '${displayValue}' is already a valid code for ${fieldName}`);
     return displayValue;
   }
   
-  console.warn(`[LookupResolver] Could not resolve '${displayValue}' for ${fieldName}. Available values:`, 
-    attribute.lookupValues.map(lv => `${lv.code}=${lv.displayValue}`).join(', '));
+  console.warn(`[LookupResolver] ✗ Could not resolve '${displayValue}' for ${fieldName}`);
+  console.warn(`[LookupResolver] Available: ${attribute.lookupValues.map(lv => `${lv.code}=${lv.displayValue}`).join(', ')}`);
   
   return displayValue; // Return as-is if no match
 }
