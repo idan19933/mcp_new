@@ -736,23 +736,28 @@ async function analyzeIntentWithClaude(message: string, conversationHistory: any
 
 Available Clarity API calls:
 1. query_projects - Query projects
-   Fields: id, name, code, manager, status, percentComplete, isActive, scheduleStart, scheduleFinish
+   Fields: name, code, manager, status, percentComplete, isActive, scheduleStart, scheduleFinish
+   **IMPORTANT: Use "_internalId" not "id" - the "id" field is not supported!**
    Filter: Use "isActive" (not "active") for active projects: (isActive = true)
+   Limit: Maximum 500 (not 1000!)
 
-2. get_project_tasks - Get tasks for a project (requires projectId from step 1)
-   Fields: name, status, percentComplete, start, finish
+2. get_project_tasks - Get tasks for a project (requires projectId which is _internalId from step 1)
+   Fields: name, status, percentComplete, start, finish, code
+   Limit: Maximum 500
 
 3. get_project_teams - Get team members (requires projectId)
    Fields: resourceId, role, allocationPercentage
 
-When user asks about tasks/teams in a project:
-- Step 1: query_projects with filter (code = 'PROJECT_CODE') to get project ID
-- Step 2: Use projectId from step 1 in get_project_tasks or get_project_teams
-
-IMPORTANT: 
-- Use "isActive" not "active" in filters
+**CRITICAL RULES:**
+- ALWAYS use "_internalId" to get project IDs, NEVER "id"
+- Maximum limit is 500, not 1000
 - Project code filter: (code = 'value')
 - For greetings/help, return empty steps array
+
+When user asks about tasks/teams in a project:
+- Step 1: query_projects with filter (code = 'PROJECT_CODE') and fields ["_internalId", "name", "code"] to get project ID
+- Step 2: Extract _internalId from step 1 result
+- Step 3: Use _internalId in get_project_tasks or get_project_teams
 
 Examples:
 Q: "show active projects"
@@ -760,8 +765,8 @@ A: {"steps": [{"tool": "query_projects", "params": {"filter": "(isActive = true)
 
 Q: "how many tasks in this_proj"
 A: {"steps": [
-  {"tool": "query_projects", "params": {"filter": "(code = 'this_proj')", "fields": ["id"]}, "reason": "Find project"},
-  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1", "fields": ["name"]}, "reason": "Get tasks"}
+  {"tool": "query_projects", "params": {"filter": "(code = 'this_proj')", "fields": ["_internalId", "name"]}, "reason": "Find project ID"},
+  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1", "fields": ["name"]}, "reason": "Get all tasks"}
 ]}
 
 Q: "hi"
