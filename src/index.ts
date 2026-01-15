@@ -692,6 +692,189 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 });
 
 // ============================================================================
+// AI AGENT - Smart Query Processing
+// ============================================================================
+
+interface QueryIntent {
+  action: string;
+  objectType?: string;
+  projectCode?: string;
+  projectId?: number;
+  fields?: string[];
+  filter?: string;
+  limit?: number;
+}
+
+function analyzeIntent(message: string): QueryIntent {
+  const lower = message.toLowerCase();
+  
+  // Extract project code (e.g., "this_proj", "PROJ-001")
+  const projectCodeMatch = message.match(/\b([a-z][a-z0-9_-]{2,})\b/i);
+  const projectCode = projectCodeMatch ? projectCodeMatch[1] : null;
+  
+  // Extract numbers (for IDs)
+  const numberMatch = message.match(/\b\d{4,}\b/);
+  const numberId = numberMatch ? parseInt(numberMatch[0]) : null;
+  
+  // COUNT queries
+  if (lower.includes('how many') || lower.includes('count')) {
+    if (lower.includes('task')) {
+      return {
+        action: 'count_tasks',
+        projectCode: projectCode,
+        objectType: 'tasks',
+        fields: ['name']
+      };
+    } else if (lower.includes('project')) {
+      return {
+        action: 'count_projects',
+        objectType: 'projects',
+        fields: ['name']
+      };
+    } else if (lower.includes('resource')) {
+      return {
+        action: 'count',
+        objectType: 'resources',
+        fields: ['fullName']
+      };
+    }
+  }
+  
+  // LIST queries
+  if (lower.includes('list') || lower.includes('show') || lower.includes('get') || lower.includes('tasks in')) {
+    if (lower.includes('task')) {
+      return {
+        action: 'list_tasks',
+        projectCode: projectCode,
+        projectId: numberId,
+        objectType: 'tasks',
+        fields: ['name', 'status', 'percentComplete', 'start', 'finish'],
+        limit: 100
+      };
+    } else if (lower.includes('project')) {
+      const isActive = lower.includes('active');
+      return {
+        action: 'list_projects',
+        objectType: 'projects',
+        filter: isActive ? '(isActive = true)' : undefined,
+        fields: ['name', 'code', 'manager', 'status', 'percentComplete'],
+        limit: 50
+      };
+    } else if (lower.includes('team')) {
+      return {
+        action: 'list_teams',
+        projectCode: projectCode,
+        projectId: numberId,
+        objectType: 'teams',
+        fields: ['resourceId', 'role', 'allocationPercentage']
+      };
+    }
+  }
+  
+  // DETAILS queries
+  if (lower.includes('status') || lower.includes('info') || lower.includes('detail')) {
+    if (lower.includes('project') && projectCode) {
+      return {
+        action: 'project_details',
+        projectCode: projectCode,
+        objectType: 'projects',
+        fields: ['name', 'code', 'status', 'manager', 'percentComplete', 'scheduleStart', 'scheduleFinish']
+      };
+    }
+  }
+  
+  // HELP
+  if (lower.includes('help') || lower.includes('what can you')) {
+    return { action: 'help' };
+  }
+  
+  // TOOLS
+  if (lower.includes('tool') || lower.includes('capabilities')) {
+    return { action: 'list_tools' };
+  }
+  
+  return { action: 'unknown' };
+}
+
+function formatResponse(intent: QueryIntent, data: any): string {
+  const count = data._totalCount || data._results?.length || 0;
+  
+  switch (intent.action) {
+    case 'count_tasks':
+      if (intent.projectCode) {
+        return `📊 Project **${intent.projectCode}** has **${count} tasks**.`;
+      }
+      return `📊 Found **${count} tasks** in total.`;
+      
+    case 'count_projects':
+      return `📊 There are **${count} projects** in the system.`;
+      
+    case 'count':
+      return `📊 Found **${count} ${intent.objectType}** in the system.`;
+      
+    case 'list_tasks':
+      if (count === 0) {
+        return `❌ No tasks found${intent.projectCode ? ` in project **${intent.projectCode}**` : ''}.`;
+      }
+      
+      const taskList = data._results?.slice(0, 15).map((t: any, i: number) => {
+        const status = t.status?.displayValue || t.status || 'Unknown';
+        const progress = t.percentComplete !== undefined ? ` - ${t.percentComplete}%` : '';
+        return `${i + 1}. **${t.name}**${progress}`;
+      }).join('\n') || '';
+      
+      const more = count > 15 ? `\n\n_...and ${count - 15} more_` : '';
+      const projectInfo = intent.projectCode ? ` in **${intent.projectCode}**` : '';
+      return `✅ Found **${count} tasks**${projectInfo}:\n\n${taskList}${more}`;
+      
+    case 'list_projects':
+      if (count === 0) {
+        return `❌ No projects found.`;
+      }
+      
+      const projList = data._results?.slice(0, 15).map((p: any, i: number) => {
+        const manager = p.manager?.displayValue || '';
+        const progress = p.percentComplete !== undefined ? ` - ${p.percentComplete}%` : '';
+        const managerText = manager ? ` (Manager: ${manager})` : '';
+        return `${i + 1}. **${p.name}** [${p.code}]${progress}${managerText}`;
+      }).join('\n') || '';
+      
+      const moreProj = count > 15 ? `\n\n_...and ${count - 15} more_` : '';
+      return `📁 Found **${count} projects**:\n\n${projList}${moreProj}`;
+      
+    case 'list_teams':
+      if (count === 0) {
+        return `❌ No team members found.`;
+      }
+      
+      const teamList = data._results?.slice(0, 20).map((t: any, i: number) => {
+        const resource = t.resourceId?.displayValue || t.resource?.displayValue || 'Unknown';
+        const role = t.role?.displayValue || '';
+        const roleText = role ? ` - ${role}` : '';
+        return `${i + 1}. ${resource}${roleText}`;
+      }).join('\n') || '';
+      
+      return `👥 Found **${count} team members**:\n\n${teamList}`;
+      
+    case 'project_details':
+      const project = data._results?.[0] || data;
+      if (!project || !project.name) {
+        return `❌ Project not found.`;
+      }
+      return `📋 **Project: ${project.name}**\n\n` +
+             `**Code:** ${project.code}\n` +
+             `**Status:** ${project.status?.displayValue || 'Unknown'}\n` +
+             `**Manager:** ${project.manager?.displayValue || 'Not assigned'}\n` +
+             `**Progress:** ${project.percentComplete || 0}% complete\n` +
+             `**Start:** ${project.scheduleStart || 'N/A'}\n` +
+             `**Finish:** ${project.scheduleFinish || 'N/A'}`;
+      
+    default:
+      return `Found ${count} results.`;
+  }
+}
+
+// ============================================================================
 // CHAT ENDPOINT (for browser extension)
 // ============================================================================
 
@@ -699,152 +882,174 @@ app.post('/api/chat', async (req, res) => {
   try {
     const { message, conversationHistory } = req.body;
     
-    // Simple AI-like processing - matches keywords to tools
-    const lowerMessage = message.toLowerCase();
+    console.log(`[Chat] Received: "${message}"`);
+    
+    // Analyze user intent
+    const intent = analyzeIntent(message);
+    console.log(`[Chat] Intent:`, intent);
     
     let response: any;
     
-    // Pattern matching for common queries
-    if (lowerMessage.includes('how many') && lowerMessage.includes('project')) {
-      // Count projects
-      try {
-        const result = await handleQueryObject({
+    // Handle special actions
+    if (intent.action === 'help') {
+      response = {
+        success: true,
+        reply: `🤖 **I can help you with Clarity PPM!**\n\n` +
+               `📊 **Count things:**\n` +
+               `- "How many projects?"\n` +
+               `- "How many tasks in this_proj?"\n` +
+               `- "Count resources"\n\n` +
+               `📋 **List things:**\n` +
+               `- "Show me active projects"\n` +
+               `- "List tasks in this_proj"\n` +
+               `- "Show team members in PROJ-001"\n\n` +
+               `🔍 **Get details:**\n` +
+               `- "Show project info for this_proj"\n` +
+               `- "Project status for PROJ-001"\n\n` +
+               `Just ask naturally! I understand project codes like "this_proj" or IDs like "5004001".`,
+        timestamp: new Date().toISOString()
+      };
+      return res.json(response);
+    }
+    
+    if (intent.action === 'list_tools') {
+      response = {
+        success: true,
+        reply: `🛠️ **I have 17 powerful tools:**\n\n` +
+               `1. Query projects, tasks, resources\n` +
+               `2. Get project tasks (optimized)\n` +
+               `3. Get team members\n` +
+               `4. Get task assignments\n` +
+               `5. Get lookup values\n` +
+               `6. Create/Update/Delete objects\n` +
+               `7. Query timesheets\n` +
+               `8. Query financials\n` +
+               `9. Query roadmaps\n` +
+               `...and more!\n\n` +
+               `Just ask me naturally and I'll use the right tool!`,
+        timestamp: new Date().toISOString()
+      };
+      return res.json(response);
+    }
+    
+    if (intent.action === 'unknown') {
+      response = {
+        success: true,
+        reply: `🤔 I'm not sure how to help with that.\n\n` +
+               `Try:\n` +
+               `- "How many tasks in this_proj?"\n` +
+               `- "Show me active projects"\n` +
+               `- "Help" for more examples`,
+        timestamp: new Date().toISOString()
+      };
+      return res.json(response);
+    }
+    
+    // Execute the appropriate tool
+    let data: any;
+    
+    try {
+      // For tasks in a specific project, we need to get the project ID first
+      if ((intent.action === 'count_tasks' || intent.action === 'list_tasks') && intent.projectCode) {
+        // Step 1: Find project by code
+        const projectResult = await handleQueryObject({
           objectName: 'projects',
-          fields: ['name'],
-          limit: 200
+          fields: ['id'],
+          filter: `(code = '${intent.projectCode}')`,
+          limit: 1
         });
         
-        const count = result._totalCount || result._results?.length || 0;
-        response = {
-          success: true,
-          reply: `There are **${count} projects** in the system.`,
-          data: result,
-          timestamp: new Date().toISOString()
-        };
-      } catch (error) {
-        response = {
-          success: false,
-          reply: `Error querying projects: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          timestamp: new Date().toISOString()
-        };
-      }
-    }
-    else if (lowerMessage.includes('active project')) {
-      // Get active projects
-      try {
-        const result = await handleQueryObject({
-          objectName: 'projects',
-          fields: ['name', 'code', 'manager'],
-          filter: '(isActive = true)',
-          limit: 50
-        });
-        
-        const count = result._totalCount || result._results?.length || 0;
-        const projectList = result._results?.slice(0, 10).map((p: any) => 
-          `- **${p.name}** (${p.code})`
-        ).join('\n') || '';
-        
-        response = {
-          success: true,
-          reply: `Found **${count} active projects**:\n\n${projectList}${count > 10 ? '\n\n_...and more_' : ''}`,
-          data: result,
-          timestamp: new Date().toISOString()
-        };
-      } catch (error) {
-        response = {
-          success: false,
-          reply: `Error querying projects: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          timestamp: new Date().toISOString()
-        };
-      }
-    }
-    else if (lowerMessage.includes('task') && lowerMessage.match(/\d+/)) {
-      // Get tasks for a project (extract project ID)
-      const projectId = parseInt(lowerMessage.match(/\d+/)?.[0] || '0');
-      if (projectId > 0) {
-        try {
-          const result = await handleGetProjectTasks({
-            projectId,
-            fields: ['name', 'status', 'percentComplete'],
-            limit: 100
-          });
-          
-          const count = result._totalCount || result._results?.length || 0;
-          const taskList = result._results?.slice(0, 10).map((t: any) => 
-            `- **${t.name}** - ${t.status || 'Unknown'} (${t.percentComplete || 0}% complete)`
-          ).join('\n') || '';
-          
-          response = {
-            success: true,
-            reply: `Found **${count} tasks** in project ${projectId}:\n\n${taskList}${count > 10 ? '\n\n_...and more_' : ''}`,
-            data: result,
-            timestamp: new Date().toISOString()
-          };
-        } catch (error) {
+        if (!projectResult._results || projectResult._results.length === 0) {
           response = {
             success: false,
-            reply: `Error querying tasks: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            reply: `❌ Project **${intent.projectCode}** not found. Please check the project code.`,
             timestamp: new Date().toISOString()
           };
+          return res.json(response);
         }
+        
+        const projectId = projectResult._results[0]._internalId || projectResult._results[0].id;
+        
+        // Step 2: Get tasks for that project
+        data = await handleGetProjectTasks({
+          projectId: projectId,
+          fields: intent.fields || ['name'],
+          limit: intent.limit || 100
+        });
       }
-    }
-    else if (lowerMessage.includes('help') || lowerMessage.includes('what can you')) {
-      // Help message
+      // For teams in a specific project
+      else if (intent.action === 'list_teams' && intent.projectCode) {
+        // Step 1: Find project by code
+        const projectResult = await handleQueryObject({
+          objectName: 'projects',
+          fields: ['id'],
+          filter: `(code = '${intent.projectCode}')`,
+          limit: 1
+        });
+        
+        if (!projectResult._results || projectResult._results.length === 0) {
+          response = {
+            success: false,
+            reply: `❌ Project **${intent.projectCode}** not found.`,
+            timestamp: new Date().toISOString()
+          };
+          return res.json(response);
+        }
+        
+        const projectId = projectResult._results[0]._internalId || projectResult._results[0].id;
+        
+        // Step 2: Get teams
+        data = await handleGetProjectTeams({
+          projectId: projectId,
+          fields: intent.fields || ['resourceId']
+        });
+      }
+      // For project details by code
+      else if (intent.action === 'project_details' && intent.projectCode) {
+        data = await handleQueryObject({
+          objectName: 'projects',
+          fields: intent.fields || ['name', 'code'],
+          filter: `(code = '${intent.projectCode}')`,
+          limit: 1
+        });
+      }
+      // Generic queries
+      else if (intent.objectType) {
+        data = await handleQueryObject({
+          objectName: intent.objectType,
+          fields: intent.fields || ['name'],
+          filter: intent.filter,
+          limit: intent.limit || 200
+        });
+      }
+      else {
+        throw new Error('No valid action determined');
+      }
+      
+      // Format the response
+      const formattedReply = formatResponse(intent, data);
+      
       response = {
         success: true,
-        reply: `I can help you with Clarity PPM! Try asking:\n\n` +
-               `📊 **Projects:**\n` +
-               `- "How many projects?"\n` +
-               `- "Show me active projects"\n` +
-               `- "List all projects"\n\n` +
-               `✓ **Tasks:**\n` +
-               `- "Show tasks in project 5004001"\n` +
-               `- "How many tasks in project X?"\n\n` +
-               `🔍 **Other:**\n` +
-               `- "What tools are available?"\n` +
-               `- "Show me lookup values for STATUS"\n\n` +
-               `I have access to **17 tools** including projects, tasks, teams, timesheets, financials, and more!`,
+        reply: formattedReply,
+        data: data,
         timestamp: new Date().toISOString()
       };
-    }
-    else if (lowerMessage.includes('tool')) {
-      // List available tools
+      
+    } catch (error) {
+      console.error('[Chat] Error:', error);
       response = {
-        success: true,
-        reply: `I have **17 tools** available:\n\n` +
-               `1. get_objects - Discover all objects\n` +
-               `2. get_object_attributes - Get schema\n` +
-               `3. query_object - Query any object\n` +
-               `4. get_project_tasks - Get project tasks\n` +
-               `5. get_project_teams - Get team members\n` +
-               `6. get_task_assignments - Get assignments\n` +
-               `7. get_lookup_values - Get dropdown values\n` +
-               `8. create_object - Create new records\n` +
-               `9. update_object - Update records\n` +
-               `10. delete_object - Delete records\n` +
-               `11. get_timesheets - Query timesheets\n` +
-               `12. get_timesheet_entries - Get time entries\n` +
-               `13. get_cost_plans - Query cost plans\n` +
-               `14. get_actual_transactions - Query financials\n` +
-               `15. get_roadmaps - Query roadmaps\n` +
-               `16. get_roadmap_items - Get roadmap items\n` +
-               `17. execute_custom_query - Custom API calls`,
-        timestamp: new Date().toISOString()
-      };
-    }
-    else {
-      // Default response with helpful hint
-      response = {
-        success: true,
-        reply: `I received your message: "${message}"\n\nI'm not sure how to help with that yet. Try asking:\n- "How many projects?"\n- "Show me active projects"\n- "Help" for more options`,
+        success: false,
+        reply: `❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
         timestamp: new Date().toISOString()
       };
     }
     
     res.json(response);
+    
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error('[Chat] Fatal error:', error);
     res.status(500).json({ 
       success: false,
       error: message,
