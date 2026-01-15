@@ -699,18 +699,157 @@ app.post('/api/chat', async (req, res) => {
   try {
     const { message, conversationHistory } = req.body;
     
-    // Simple echo for testing - replace with actual AI logic later
-    const response = {
-      success: true,
-      reply: `Received: ${message}`,
-      timestamp: new Date().toISOString(),
-      tools_available: 17
-    };
+    // Simple AI-like processing - matches keywords to tools
+    const lowerMessage = message.toLowerCase();
+    
+    let response: any;
+    
+    // Pattern matching for common queries
+    if (lowerMessage.includes('how many') && lowerMessage.includes('project')) {
+      // Count projects
+      try {
+        const result = await handleQueryObject({
+          objectName: 'projects',
+          fields: ['name'],
+          limit: 200
+        });
+        
+        const count = result._totalCount || result._results?.length || 0;
+        response = {
+          success: true,
+          reply: `There are **${count} projects** in the system.`,
+          data: result,
+          timestamp: new Date().toISOString()
+        };
+      } catch (error) {
+        response = {
+          success: false,
+          reply: `Error querying projects: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          timestamp: new Date().toISOString()
+        };
+      }
+    }
+    else if (lowerMessage.includes('active project')) {
+      // Get active projects
+      try {
+        const result = await handleQueryObject({
+          objectName: 'projects',
+          fields: ['name', 'code', 'manager'],
+          filter: '(isActive = true)',
+          limit: 50
+        });
+        
+        const count = result._totalCount || result._results?.length || 0;
+        const projectList = result._results?.slice(0, 10).map((p: any) => 
+          `- **${p.name}** (${p.code})`
+        ).join('\n') || '';
+        
+        response = {
+          success: true,
+          reply: `Found **${count} active projects**:\n\n${projectList}${count > 10 ? '\n\n_...and more_' : ''}`,
+          data: result,
+          timestamp: new Date().toISOString()
+        };
+      } catch (error) {
+        response = {
+          success: false,
+          reply: `Error querying projects: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          timestamp: new Date().toISOString()
+        };
+      }
+    }
+    else if (lowerMessage.includes('task') && lowerMessage.match(/\d+/)) {
+      // Get tasks for a project (extract project ID)
+      const projectId = parseInt(lowerMessage.match(/\d+/)?.[0] || '0');
+      if (projectId > 0) {
+        try {
+          const result = await handleGetProjectTasks({
+            projectId,
+            fields: ['name', 'status', 'percentComplete'],
+            limit: 100
+          });
+          
+          const count = result._totalCount || result._results?.length || 0;
+          const taskList = result._results?.slice(0, 10).map((t: any) => 
+            `- **${t.name}** - ${t.status || 'Unknown'} (${t.percentComplete || 0}% complete)`
+          ).join('\n') || '';
+          
+          response = {
+            success: true,
+            reply: `Found **${count} tasks** in project ${projectId}:\n\n${taskList}${count > 10 ? '\n\n_...and more_' : ''}`,
+            data: result,
+            timestamp: new Date().toISOString()
+          };
+        } catch (error) {
+          response = {
+            success: false,
+            reply: `Error querying tasks: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            timestamp: new Date().toISOString()
+          };
+        }
+      }
+    }
+    else if (lowerMessage.includes('help') || lowerMessage.includes('what can you')) {
+      // Help message
+      response = {
+        success: true,
+        reply: `I can help you with Clarity PPM! Try asking:\n\n` +
+               `📊 **Projects:**\n` +
+               `- "How many projects?"\n` +
+               `- "Show me active projects"\n` +
+               `- "List all projects"\n\n` +
+               `✓ **Tasks:**\n` +
+               `- "Show tasks in project 5004001"\n` +
+               `- "How many tasks in project X?"\n\n` +
+               `🔍 **Other:**\n` +
+               `- "What tools are available?"\n` +
+               `- "Show me lookup values for STATUS"\n\n` +
+               `I have access to **17 tools** including projects, tasks, teams, timesheets, financials, and more!`,
+        timestamp: new Date().toISOString()
+      };
+    }
+    else if (lowerMessage.includes('tool')) {
+      // List available tools
+      response = {
+        success: true,
+        reply: `I have **17 tools** available:\n\n` +
+               `1. get_objects - Discover all objects\n` +
+               `2. get_object_attributes - Get schema\n` +
+               `3. query_object - Query any object\n` +
+               `4. get_project_tasks - Get project tasks\n` +
+               `5. get_project_teams - Get team members\n` +
+               `6. get_task_assignments - Get assignments\n` +
+               `7. get_lookup_values - Get dropdown values\n` +
+               `8. create_object - Create new records\n` +
+               `9. update_object - Update records\n` +
+               `10. delete_object - Delete records\n` +
+               `11. get_timesheets - Query timesheets\n` +
+               `12. get_timesheet_entries - Get time entries\n` +
+               `13. get_cost_plans - Query cost plans\n` +
+               `14. get_actual_transactions - Query financials\n` +
+               `15. get_roadmaps - Query roadmaps\n` +
+               `16. get_roadmap_items - Get roadmap items\n` +
+               `17. execute_custom_query - Custom API calls`,
+        timestamp: new Date().toISOString()
+      };
+    }
+    else {
+      // Default response with helpful hint
+      response = {
+        success: true,
+        reply: `I received your message: "${message}"\n\nI'm not sure how to help with that yet. Try asking:\n- "How many projects?"\n- "Show me active projects"\n- "Help" for more options`,
+        timestamp: new Date().toISOString()
+      };
+    }
     
     res.json(response);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    res.status(500).json({ error: message });
+    res.status(500).json({ 
+      success: false,
+      error: message,
+      timestamp: new Date().toISOString()
+    });
   }
 });
 
