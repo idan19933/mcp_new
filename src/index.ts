@@ -368,7 +368,25 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
       }
     }
     
-    path = `/${intent.objectType}/${actualRecordId}`;
+    // Handle parent-child UPDATE (e.g., update task in project)
+    if (intent.parentId && intent.childType) {
+      let actualParentId = intent.parentId;
+      if (typeof actualParentId === 'string' && actualParentId.includes('STEP_')) {
+        const stepMatch = actualParentId.match(/STEP_(\d+)_ID/);
+        if (stepMatch && previousResults) {
+          const stepIndex = parseInt(stepMatch[1]) - 1;
+          const previousResult = previousResults[stepIndex];
+          if (previousResult?.result?._results?.[0]?._internalId) {
+            actualParentId = previousResult.result._results[0]._internalId;
+            console.log(`[QueryBuilder] Resolved ${intent.parentId} to ${actualParentId}`);
+          }
+        }
+      }
+      path = `/${intent.objectType}/${actualParentId}/${intent.childType}/${actualRecordId}`;
+    } else {
+      path = `/${intent.objectType}/${actualRecordId}`;
+    }
+    
     method = 'PATCH';
     body = intent.data || {};
     return { path, query: {}, metadata, method, body };
@@ -747,7 +765,9 @@ A: {
     },
     {
       "operation": "update",
-      "objectType": "tasks",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
       "recordId": "STEP_2_ID",
       "data": {
         "percentComplete": 50
@@ -765,8 +785,9 @@ A: {
 5. Always include _internalId in project lookup steps
 6. For CREATE operations - Use "data" field with required attributes
 7. For UPDATE operations - Use "recordId" and "data" with fields to update
-8. For creating TASKS - Only "name" is required. Optional: durationDays, percentComplete, startDate, finishDate
-9. For creating PROJECTS - "name" and "code" are required. Optional: status, manager, scheduleStart, scheduleFinish
+8. For UPDATING TASKS - Include parentId and childType to maintain project context
+9. For creating TASKS - Only "name" is required. Optional: durationDays, percentComplete, startDate, finishDate
+10. For creating PROJECTS - "name" and "code" are required. Optional: status, manager, scheduleStart, scheduleFinish
 
 User Query: "${message}"
 
@@ -926,25 +947,29 @@ function formatResponse(execution: any): string {
   const objectType = finalResult.objectType;
   const intent = execution.plan?.intent || '';
   
+  // Get the actual child type if this is a parent-child query
+  const finalStep = execution.plan?.steps?.[execution.plan.steps.length - 1];
+  const actualType = finalStep?.childType || objectType;
+  
   // Handle CREATE operations
   if (operation === 'create') {
     const newId = finalResult.result._internalId;
-    return `✅ **Created ${objectType}** (ID: ${newId})`;
+    return `✅ **Created ${actualType}** (ID: ${newId})`;
   }
   
   // Handle UPDATE operations
   if (operation === 'update') {
     const updatedId = finalResult.result._internalId;
-    return `✅ **Updated ${objectType}** (ID: ${updatedId})`;
+    return `✅ **Updated ${actualType}** (ID: ${updatedId})`;
   }
   
   // Handle count operations
   if (operation === 'count') {
-    return `📊 **Found ${count} ${objectType}**`;
+    return `📊 **Found ${count} ${actualType}**`;
   }
   
   if (count === 0) {
-    return `❌ No ${objectType} found`;
+    return `❌ No ${actualType} found`;
   }
   
   // Handle distribution/grouping intents
@@ -969,7 +994,7 @@ function formatResponse(execution: any): string {
   }
   
   // Standard list response
-  let reply = `✅ **Found ${count} ${objectType}**\n\n`;
+  let reply = `✅ **Found ${count} ${actualType}**\n\n`;
   
   if (finalResult.result._results && finalResult.result._results.length > 0) {
     const items = finalResult.result._results.slice(0, 15).map((item: any, i: number) => {
