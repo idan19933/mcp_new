@@ -6,11 +6,11 @@
  * For Railway deployment with browser extension support
  */
 
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
 // ============================================================================
 // CONFIGURATION
@@ -674,7 +674,7 @@ app.post('/api/query', async (req, res) => {
 // ERROR HANDLING
 // ============================================================================
 
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('[Error]', err);
   res.status(500).json({ 
     error: err.message || 'Internal server error',
@@ -709,12 +709,10 @@ app.post('/api/chat', async (req, res) => {
 // START SERVER
 // ============================================================================
 
-const HOST = '0.0.0.0'; // Important: bind to all interfaces for Railway
-
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, () => {
   console.log('='.repeat(70));
   console.log(`🚀 Clarity PPM HTTP Server v2.0.0`);
-  console.log(`📡 Listening on ${HOST}:${PORT}`);
+  console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔧 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.authToken ? 'Token' : config.username ? 'Basic' : 'Session'}`);
   console.log(`✅ All 17 tools available`);
@@ -723,4 +721,12 @@ app.listen(PORT, HOST, () => {
   console.log(`Chat endpoint: POST http://localhost:${PORT}/api/chat`);
   console.log(`Unified tool: POST http://localhost:${PORT}/api/tool`);
   console.log('='.repeat(70));
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+  });
 });
