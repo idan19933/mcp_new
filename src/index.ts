@@ -538,7 +538,9 @@ Respond ONLY with the JSON execution plan. No explanations.`;
       return fallbackAnalysis(message);
     }
     
-    const data = await response.json();
+    const data = await response.json() as {
+      content: Array<{ type: string; text: string }>;
+    };
     const content = data.content[0].text;
     
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -614,7 +616,7 @@ async function executePlan(plan: any): Promise<any> {
       
       // Execute query
       const queryString = new URLSearchParams(
-        Object.entries(query).map(([k, v]) => [k, String(v)])
+        Object.entries(query).map(([k, v]) => [k, String(v)] as [string, string])
       ).toString();
       
       const result = await makeRequest(`${path}?${queryString}`);
