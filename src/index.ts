@@ -7,7 +7,6 @@
  */
 
 import express, { Request, Response, NextFunction } from 'express';
-import cors from 'cors';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -36,7 +35,17 @@ const config: ClarityConfig = {
 // MIDDLEWARE
 // ============================================================================
 
-app.use(cors());
+// Simple CORS middleware (no external dependency)
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
 
 // Logging middleware
