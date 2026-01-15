@@ -723,11 +723,11 @@ function analyzeIntent(message: string): QueryIntent {
   
   // Extract project code (e.g., "this_proj", "PROJ-001")
   const projectCodeMatch = message.match(/\b([a-z][a-z0-9_-]{2,})\b/i);
-  const projectCode = projectCodeMatch ? projectCodeMatch[1] : null;
+  const projectCode = projectCodeMatch ? projectCodeMatch[1] : undefined;
   
   // Extract numbers (for IDs)
   const numberMatch = message.match(/\b\d{4,}\b/);
-  const numberId = numberMatch ? parseInt(numberMatch[0]) : null;
+  const numberId = numberMatch ? parseInt(numberMatch[0]) : undefined;
   
   // COUNT queries
   if (lower.includes('how many') || lower.includes('count')) {
