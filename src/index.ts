@@ -992,12 +992,31 @@ app.post('/api/chat', async (req, res) => {
         console.log(`[AI Agent] Executing: ${step.tool} - ${step.reason}`);
         
         try {
-          // Replace placeholders with values from previous steps
-          let params = step.params;
-          if (typeof params === 'object') {
-            params = JSON.parse(JSON.stringify(params).replace(/"FROM_STEP_(\d+)"/g, (match, stepNum) => {
-              return JSON.stringify(context[`step${stepNum}`]);
-            }));
+          // Deep clone params to avoid mutation
+          let params = JSON.parse(JSON.stringify(step.params));
+          
+          // Handle parameter replacement from previous steps
+          Object.keys(params).forEach(key => {
+            const value = params[key];
+            
+            // Handle FROM_STEP_X pattern - extract _internalId
+            if (typeof value === 'string' && value.startsWith('FROM_STEP_')) {
+              const stepNum = parseInt(value.split('_')[2]);
+              const stepResult = context[`step${stepNum}`];
+              
+              if (stepResult && stepResult._results && stepResult._results[0]) {
+                // Extract _internalId (preferred) or id as fallback
+                params[key] = stepResult._results[0]._internalId || stepResult._results[0].id;
+                console.log(`[AI Agent] Replaced ${value} with: ${params[key]}`);
+              } else {
+                throw new Error(`Could not extract ID from step ${stepNum}`);
+              }
+            }
+          });
+          
+          // Use context.projectId as fallback if not in params
+          if (!params.projectId && context.projectId) {
+            params.projectId = context.projectId;
           }
           
           // Execute the tool
@@ -1006,37 +1025,40 @@ app.post('/api/chat', async (req, res) => {
           if (step.tool === 'query_projects') {
             result = await handleQueryObject({
               objectName: 'projects',
-              fields: params.fields || ['id', 'name', 'code'],
+              fields: params.fields || ['_internalId', 'name', 'code'],
               filter: params.filter,
-              limit: params.limit || 100
+              limit: Math.min(params.limit || 100, 500)
             });
           } else if (step.tool === 'get_project_tasks') {
-            const projectId = params.projectId || context.projectId;
+            if (!params.projectId) {
+              throw new Error('projectId is required for get_project_tasks');
+            }
             result = await handleGetProjectTasks({
-              projectId: projectId,
+              projectId: params.projectId,
               fields: params.fields || ['name', 'status', 'percentComplete'],
-              limit: params.limit || 100
+              limit: Math.min(params.limit || 100, 500)
             });
           } else if (step.tool === 'get_project_teams') {
-            const projectId = params.projectId || context.projectId;
+            if (!params.projectId) {
+              throw new Error('projectId is required for get_project_teams');
+            }
             result = await handleGetProjectTeams({
-              projectId: projectId,
+              projectId: params.projectId,
               fields: params.fields || ['resourceId', 'role']
             });
           } else {
             throw new Error(`Unknown tool: ${step.tool}`);
           }
           
-          // Store result in context
-          context[`step${plan.steps.indexOf(step) + 1}`] = result;
+          // Store result in context with step number
+          const stepIndex = plan.steps.indexOf(step) + 1;
+          context[`step${stepIndex}`] = result;
           
-          // Extract useful values
+          // Extract projectId from result for next steps
           if (result && result._results && result._results[0]) {
             if (result._results[0]._internalId) {
               context.projectId = result._results[0]._internalId;
-            }
-            if (result._results[0].id) {
-              context.projectId = context.projectId || result._results[0].id;
+              console.log(`[AI Agent] Extracted projectId: ${context.projectId}`);
             }
           }
           
