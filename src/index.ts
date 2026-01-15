@@ -436,7 +436,7 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
   // Set limit
   if (intent.limit) {
     query.limit = Math.min(intent.limit, 500);
-  } else if (!query.limit && intent.operation !== 'create' && intent.operation !== 'update') {
+  } else if (intent.operation !== 'create' && intent.operation !== 'update' && !query.limit) {
     query.limit = intent.operation === 'count' ? 500 : 50;
   }
   
