@@ -1,6 +1,8 @@
 /**
- * Clarity PPM HTTP Server v3.0.0 - Dynamic Swagger Edition
- * Capability: Can call ANY endpoint defined in Clarity Swagger without hardcoding tools
+ * Clarity PPM HTTP Server v4.0.0 - Enhanced Intelligent Describe Edition
+ * - Uses /describe and /describeAttributes for dynamic schema discovery
+ * - Supports multiple filter combinations for different object types
+ * - Intelligent caching and query optimization
  */
 
 import express, { Request, Response } from 'express';
@@ -43,7 +45,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================================
-// GENERIC HTTP CLIENT
+// HTTP CLIENT
 // ============================================================================
 
 async function makeRequest(urlPath: string, method: string = 'GET', body?: any): Promise<any> {
@@ -87,274 +89,432 @@ async function makeRequest(urlPath: string, method: string = 'GET', body?: any):
 }
 
 // ============================================================================
-// CACHING
+// INTELLIGENT METADATA CACHE
 // ============================================================================
 
-const schemaCache = new Map<string, any>();
+interface ObjectMetadata {
+  resourceName: string;
+  objectCode: string;
+  supportedHttpMethods: string[];
+  childResources: string[];
+  attributes: AttributeMetadata[];
+  isCustom: boolean;
+  hierarchyEnabled: boolean;
+  lastUpdated: number;
+}
 
-async function getObjectSchema(objectName: string): Promise<any> {
-  if (schemaCache.has(objectName)) {
-    console.log(`[Cache] Using cached schema for ${objectName}`);
-    return schemaCache.get(objectName);
-  }
+interface AttributeMetadata {
+  apiName: string;
+  dataType: string;
+  displayName: string;
+  required: boolean;
+  isLookup: boolean;
+  lookupType?: string;
+  maxLength?: number;
+  isCustom: boolean;
+}
 
+const metadataCache = new Map<string, ObjectMetadata>();
+const CACHE_TTL = 1000 * 60 * 15; // 15 minutes
+
+// ============================================================================
+// METADATA DISCOVERY - Using /describe and /describeAttributes
+// ============================================================================
+
+/**
+ * Discovers all available objects in Clarity
+ * Pattern: /describe?filter=((extensions in ('inv')) and (isCustom = true) and (capabilities in ('HIERARCHY_ENABLED')))
+ */
+async function discoverAllObjects(): Promise<string[]> {
+  console.log('[Metadata] Discovering all objects...');
+  
   try {
-    const cleanName = objectName.replace(/[^a-zA-Z0-9_]/g, '');
-    const result = await makeRequest(`/describeAttributes?filter=(resourceName='${cleanName}')`);
+    // Get standard objects
+    const standardResult = await makeRequest('/describe?limit=500');
     
-    if (!result._results || result._results.length === 0) {
-      console.warn(`[Schema] No attributes found for ${objectName}, using fallback`);
-      return {
-        _results: [
-          { apiName: '_internalId', dataType: 'number' },
-          { apiName: 'name', dataType: 'string' },
-          { apiName: 'code', dataType: 'string' }
-        ],
-        _fallback: true
-      };
-    }
-
-    schemaCache.set(objectName, result);
-    console.log(`[Schema] Cached ${result._results.length} fields for ${objectName}`);
-    return result;
+    // Get custom objects
+    const customResult = await makeRequest('/describe?filter=((isCustom = true))&limit=500');
+    
+    const allObjects = [
+      ...(standardResult._results || []),
+      ...(customResult._results || [])
+    ];
+    
+    const objectNames = allObjects
+      .map((obj: any) => obj.resourceName)
+      .filter(Boolean);
+    
+    console.log(`[Metadata] Discovered ${objectNames.length} objects`);
+    return objectNames;
+    
   } catch (error) {
-    console.error(`[Schema] Error for ${objectName}:`, error);
-    return {
-      _results: [
-        { apiName: '_internalId', dataType: 'number' },
-        { apiName: 'name', dataType: 'string' }
-      ],
-      _fallback: true
-    };
+    console.error('[Metadata] Discovery failed:', error);
+    return [
+      'projects', 'tasks', 'resources', 'timesheets', 'ideas', 'risks', 
+      'issues', 'objectives', 'roadmaps', 'users', 'agreements'
+    ]; // Fallback
   }
 }
 
-// ============================================================================
-// SIMPLE PATTERN MATCHER (Fallback)
-// ============================================================================
+/**
+ * Detects the appropriate filter pattern based on object type
+ */
+function detectObjectFilterPattern(objectName: string): 'full' | 'simple' {
+  const lowerName = objectName.toLowerCase();
+  
+  // OBA objects always use simple pattern
+  if (lowerName.startsWith('oba')) {
+    return 'simple';
+  }
+  
+  // Standard objects use full pattern
+  const standardObjects = [
+    'projects', 'tasks', 'resources', 'timesheets', 'ideas', 'risks', 
+    'issues', 'users', 'allocations', 'agreements'
+  ];
+  
+  if (standardObjects.includes(lowerName)) {
+    return 'full';
+  }
+  
+  // Custom objects: try full first, can fall back to simple
+  return 'full';
+}
 
-function simplePatternMatch(message: string): any {
-  const lower = message.toLowerCase();
+/**
+ * Gets comprehensive metadata for a specific object
+ * Supports multiple filter combinations:
+ * - Full: honorFieldLevelSecurity + dataType filter + includeObjFilters + actionType
+ * - Simple: honorFieldLevelSecurity only
+ */
+async function getObjectMetadata(objectName: string, forceRefresh: boolean = false): Promise<ObjectMetadata> {
+  const cacheKey = objectName.toLowerCase();
   
-  // Greetings
-  if (/^(hi|hello|hey)$/i.test(lower.trim())) {
-    return {
-      steps: [],
-      message: "👋 Hello! I can help you query Clarity PPM. Try asking 'how many projects' or 'show active projects'",
-      intent: "greeting"
-    };
+  // Check cache
+  if (!forceRefresh && metadataCache.has(cacheKey)) {
+    const cached = metadataCache.get(cacheKey)!;
+    if (Date.now() - cached.lastUpdated < CACHE_TTL) {
+      console.log(`[Metadata] Using cached metadata for ${objectName}`);
+      return cached;
+    }
   }
   
-  // Count projects
-  if (/how many.*project/i.test(lower)) {
-    return {
-      steps: [
-        {
-          tool: "get_schema",
-          params: { objectName: "projects" },
-          reason: "Learn project schema"
-        },
-        {
-          tool: "call_endpoint",
-          params: {
-            path: "/projects",
-            query: { fields: "_internalId", limit: 500 }
-          },
-          reason: "Count all projects"
-        }
-      ],
-      intent: "count_projects"
-    };
-  }
+  console.log(`[Metadata] Fetching metadata for ${objectName}...`);
   
-  // List active projects
-  if (/(show|list).*active.*project/i.test(lower)) {
-    return {
-      steps: [
-        {
-          tool: "get_schema",
-          params: { objectName: "projects" },
-          reason: "Learn project schema"
-        },
-        {
-          tool: "call_endpoint",
-          params: {
-            path: "/projects",
-            query: {
-              filter: "(isActive=true)",
-              fields: "FIELDS_FROM_STEP_1",
-              limit: 50
-            }
-          },
-          reason: "List active projects"
-        }
-      ],
-      intent: "list_projects"
+  try {
+    // Step 1: Get object-level metadata
+    const describeResult = await makeRequest(
+      `/describe/${objectName}?filter=(excludeAttributes = false)`
+    );
+    
+    // Step 2: Detect filter pattern
+    const filterPattern = detectObjectFilterPattern(objectName);
+    
+    // Step 3: Build describeAttributes query
+    let attributesUrl: string;
+    
+    if (filterPattern === 'full') {
+      // Full filter pattern for standard and complex custom objects
+      // Pattern: (resourceName='X') and (honorFieldLevelSecurity=true) and 
+      //          (dataType notIn ('clob','attachment')) and (includeObjFilters=true) and 
+      //          (actionType!='dataOnly')
+      attributesUrl = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true) and (dataType notIn ('clob','attachment')) and (includeObjFilters = true) and (actionType != 'dataOnly'))&limit=1500&_totalCount=false`;
+    } else {
+      // Simple filter pattern for OBA and simple custom objects
+      // Pattern: (resourceName='X') and (honorFieldLevelSecurity=true)
+      attributesUrl = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true))&limit=1500&_totalCount=false`;
+    }
+    
+    console.log(`[Metadata] Using ${filterPattern} filter pattern`);
+    
+    let attributesResult;
+    try {
+      attributesResult = await makeRequest(attributesUrl);
+    } catch (error) {
+      // If full pattern fails, try simple pattern
+      if (filterPattern === 'full') {
+        console.log(`[Metadata] Full pattern failed, trying simple pattern...`);
+        attributesUrl = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true))&limit=1500&_totalCount=false`;
+        attributesResult = await makeRequest(attributesUrl);
+      } else {
+        throw error;
+      }
+    }
+    
+    // Process attributes
+    const attributes: AttributeMetadata[] = (attributesResult._results || []).map((attr: any) => ({
+      apiName: attr.apiName || attr.name,
+      dataType: attr.dataType || 'string',
+      displayName: attr.displayName || attr.apiName || attr.name,
+      required: attr.required === true,
+      isLookup: attr.dataType === 'lookup',
+      lookupType: attr.lookupType,
+      maxLength: attr.maxLength,
+      isCustom: attr.isCustom === true
+    }));
+    
+    // Build metadata object
+    const metadata: ObjectMetadata = {
+      resourceName: objectName,
+      objectCode: describeResult.objectCode || objectName,
+      supportedHttpMethods: describeResult.supportedHttpMethods || ['GET'],
+      childResources: describeResult.childResources || [],
+      attributes,
+      isCustom: describeResult.isCustom === true,
+      hierarchyEnabled: describeResult.hierarchyEnabled === true,
+      lastUpdated: Date.now()
     };
+    
+    // Cache it
+    metadataCache.set(cacheKey, metadata);
+    console.log(`[Metadata] Cached ${attributes.length} attributes for ${objectName}`);
+    
+    return metadata;
+    
+  } catch (error) {
+    console.error(`[Metadata] Failed to fetch metadata for ${objectName}:`, error);
+    throw error;
   }
+}
+
+/**
+ * Gets smart field selection based on metadata
+ * Filters out CLOB, attachment, and other problematic field types
+ */
+function getSmartFieldSelection(metadata: ObjectMetadata, maxFields: number = 15): string[] {
+  const priorityFields = ['_internalId', 'name', 'code', 'uniqueName', 'status'];
   
-  // Count resources
-  if (/how many.*resource/i.test(lower)) {
-    return {
-      steps: [
-        {
-          tool: "get_schema",
-          params: { objectName: "resources" },
-          reason: "Learn resource schema"
-        },
-        {
-          tool: "call_endpoint",
-          params: {
-            path: "/resources",
-            query: { fields: "_internalId", limit: 500 }
-          },
-          reason: "Count all resources"
-        }
-      ],
-      intent: "count_resources"
-    };
-  }
+  const filteredAttributes = metadata.attributes
+    .filter(attr => {
+      // Exclude problematic types
+      if (attr.dataType === 'clob' || attr.dataType === 'attachment') return false;
+      if (attr.apiName === 'attachment') return false;
+      
+      // Include priority fields
+      if (priorityFields.includes(attr.apiName)) return true;
+      
+      // Include reasonable fields
+      return attr.apiName !== '_links' && 
+             (!attr.apiName.startsWith('_') || attr.apiName === '_internalId');
+    })
+    .sort((a, b) => {
+      // Sort by priority
+      const aPriority = priorityFields.indexOf(a.apiName);
+      const bPriority = priorityFields.indexOf(b.apiName);
+      if (aPriority !== -1 && bPriority !== -1) return aPriority - bPriority;
+      if (aPriority !== -1) return -1;
+      if (bPriority !== -1) return 1;
+      return a.apiName.localeCompare(b.apiName);
+    })
+    .slice(0, maxFields);
   
-  return {
-    steps: [],
-    message: "I'm not sure how to help with that. Try 'how many projects' or 'show active projects'",
-    intent: "unknown"
-  };
+  return filteredAttributes.map(attr => attr.apiName);
 }
 
 // ============================================================================
-// AI AGENT: DYNAMIC SWAGGER LOGIC
+// INTELLIGENT QUERY BUILDER
 // ============================================================================
 
-async function analyzeIntentWithClaude(message: string, history: any[]): Promise<any> {
+interface QueryIntent {
+  operation: 'count' | 'list' | 'get' | 'create' | 'update' | 'delete';
+  objectType: string;
+  filters?: Record<string, any>;
+  fields?: string[];
+  parentId?: string;
+  childType?: string;
+  limit?: number;
+}
+
+async function buildIntelligentQuery(intent: QueryIntent): Promise<any> {
+  console.log('[QueryBuilder] Building query for:', JSON.stringify(intent, null, 2));
+  
+  // Get metadata
+  const metadata = await getObjectMetadata(intent.objectType);
+  
+  // Build query based on operation
+  let path = `/${intent.objectType}`;
+  let query: Record<string, any> = {};
+  
+  // Handle parent-child relationships
+  if (intent.parentId && intent.childType) {
+    path = `/${intent.objectType}/${intent.parentId}/${intent.childType}`;
+    
+    // Get child metadata
+    const childMetadata = await getObjectMetadata(intent.childType);
+    metadata.attributes = childMetadata.attributes;
+  }
+  
+  // Set fields
+  if (intent.operation === 'count') {
+    query.fields = '_internalId';
+    query.limit = 500;
+  } else if (intent.fields && intent.fields.length > 0) {
+    query.fields = intent.fields.join(',');
+  } else {
+    const smartFields = getSmartFieldSelection(metadata);
+    query.fields = smartFields.join(',');
+  }
+  
+  // Set filters
+  if (intent.filters && Object.keys(intent.filters).length > 0) {
+    const filterParts: string[] = [];
+    
+    for (const [key, value] of Object.entries(intent.filters)) {
+      if (value === null) {
+        filterParts.push(`(${key} = null)`);
+      } else if (typeof value === 'boolean') {
+        filterParts.push(`(${key} = ${value})`);
+      } else if (typeof value === 'number') {
+        filterParts.push(`(${key} = ${value})`);
+      } else {
+        filterParts.push(`(${key} = '${value}')`);
+      }
+    }
+    
+    query.filter = filterParts.length === 1 
+      ? filterParts[0] 
+      : `(${filterParts.join(' and ')})`;
+  }
+  
+  // Set limit
+  if (intent.limit) {
+    query.limit = Math.min(intent.limit, 500);
+  } else if (!query.limit) {
+    query.limit = intent.operation === 'count' ? 500 : 50;
+  }
+  
+  return { path, query, metadata };
+}
+
+// ============================================================================
+// AI AGENT WITH CLAUDE ANALYSIS
+// ============================================================================
+
+async function analyzeUserRequest(message: string): Promise<any> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   
-  // Simple fallback patterns if no AI key
   if (!ANTHROPIC_API_KEY) {
-    console.log('[AI] No API key, using simple patterns');
-    return simplePatternMatch(message);
+    console.log('[AI] No API key, using fallback');
+    return fallbackAnalysis(message);
   }
 
-  // Comprehensive Swagger-aware system prompt
-  const systemPrompt = `You are a Clarity PPM API Expert. You construct REST API calls dynamically based on Clarity Swagger patterns.
+  const systemPrompt = `You are a Clarity PPM API expert that uses intelligent metadata discovery.
 
-**SWAGGER KNOWLEDGE BASE:**
+**YOUR PROCESS:**
+1. Analyze the user's natural language request
+2. Identify the Clarity objects involved (projects, tasks, resources, etc.)
+3. Determine what operation is needed (count, list, get, create, update)
+4. Extract any filters or conditions
+5. Return a structured execution plan
 
-**Top-Level Objects (Direct Access):**
-/projects, /resources, /ideas, /risks, /issues, /timesheets, /users, /objectives
-/costPlans, /benefitPlans, /actualTransactions, /unpostedTransactions, /vouchers
-/agreements, /allocations, /skills, /hierarchies, /scenarios, /roadmaps
+**AVAILABLE OPERATIONS:**
+- count: Count records (returns total number)
+- list: List multiple records with details
+- get: Get a single specific record
+- create: Create a new record
+- update: Update an existing record
+- delete: Delete a record
 
-**Child Objects (Parent/{id}/Child):**
-/projects/{id}/tasks, /projects/{id}/teams, /projects/{id}/risks, /projects/{id}/issues
-/projects/{id}/changes, /projects/{id}/projectStatusReports, /projects/{id}/baselines
-/timesheets/{id}/timeEntries, /timesheets/{id}/notes
-/roadmaps/{id}/roadmapItems, /roadmapItems/{id}/itemEvents
-/objectives/{id}/keyResults, /keyResults/{id}/actualValues
-/costPlans/{id}/costPlanDetails, /benefitPlans/{id}/benefitPlanDetails
+**COMMON CLARITY OBJECTS:**
+Standard: projects, tasks, resources, timesheets, ideas, risks, issues
+Strategic: objectives, roadmaps, keyResults, roadmapItems
+Financial: costPlans, benefitPlans, vouchers, actualTransactions
+Custom: custTaskUpdates, custWorkPlanBudget, custMilestoneTracker
+OBA: obaTasks, obaInvestments, obaStaffs, obaTodos
 
-**Task Sub-Resources:**
-/projects/{projectId}/tasks/{taskId}/assignments
-/projects/{projectId}/tasks/{taskId}/taskDependencies
-/projects/{projectId}/tasks/{taskId}/todos
+**FILTER OPERATORS:**
+- = (equals)
+- != (not equals)
+- > < >= <= (comparisons)
+- startsWith, endsWith
+- null checks
 
-**Lookup Values:**
-/lookups/{lookupType}/lookupValues
-Examples: /lookups/BROWSE_PROJMGR/lookupValues, /lookups/INV_IDEA_STATUS/lookupValues
-
-**Metadata:**
-/describeAttributes?filter=(resourceName='{objectName}')
-
-**EXECUTION STRATEGY:**
-
-**For "List" Queries (e.g., "Show me active projects"):**
-Step 1: get_schema(objectName) - Discover available fields
-Step 2: call_endpoint(path="/projects", query={filter: "(isActive=true)", fields: "FIELDS_FROM_STEP_1"})
-
-**For "Child Object" Queries (e.g., "Show risks for project Alpha"):**
-Step 1: get_schema("projects") - Learn project schema
-Step 2: call_endpoint(path="/projects", query={filter: "(name='Alpha')", fields: "_internalId,name"})
-Step 3: get_schema("risks") - Learn risk schema  
-Step 4: call_endpoint(path="/projects/ID_FROM_STEP_2/risks", query={fields: "FIELDS_FROM_STEP_3"})
-
-**For "Count" Queries (e.g., "How many timesheets"):**
-Step 1: get_schema("timesheets")
-Step 2: call_endpoint(path="/timesheets", query={fields: "_internalId", limit: 500})
-
-**For "Create/Update" Queries:**
-Step 1: get_schema(objectName) - Learn required fields
-Step 2: call_endpoint(path="/projects", method="POST", body={...})
-
-**AVAILABLE TOOLS:**
-
-1. **get_schema**
-   - objectName: string (e.g., "projects", "risks", "timesheets")
-   - reason: string (why discovering schema)
-
-2. **call_endpoint**
-   - path: string (e.g., "/projects", "/projects/5001/tasks")
-   - method: "GET" | "POST" | "PATCH" | "DELETE" (default: GET)
-   - query: object (e.g., {filter: "(isActive=true)", fields: "name,code", limit: 50})
-   - body: object (for POST/PATCH)
-   - reason: string (why calling this endpoint)
-
-**PLACEHOLDERS:**
-- "FIELDS_FROM_STEP_X" - Extract field names from schema in step X
-- "ID_FROM_STEP_X" - Extract _internalId from result in step X
-- "ALL_IDS_FROM_STEP_X" - Extract array of all _internalId values from step X
-
-**CRITICAL RULES:**
-1. ALWAYS call get_schema BEFORE querying an object
-2. Use "_internalId" for IDs (never "id")
-3. For counts: fields="_internalId" only
-4. For lists: fields extracted from schema (max 10 fields)
-5. Parent-child relationships: Get parent ID first, then query child
-6. Filter syntax: (fieldName = 'value') with spaces around operator
-7. Maximum limit: 500
+**EXECUTION PLAN FORMAT:**
+{
+  "steps": [
+    {
+      "operation": "count|list|get|create|update|delete",
+      "objectType": "projects",
+      "filters": { "isActive": true, "status": "APPROVED" },
+      "fields": ["name", "code", "manager"],
+      "limit": 50
+    }
+  ],
+  "intent": "brief description"
+}
 
 **EXAMPLES:**
 
 Q: "How many active projects?"
 A: {
   "steps": [
-    {"tool": "get_schema", "params": {"objectName": "projects"}, "reason": "Learn project schema"},
-    {"tool": "call_endpoint", "params": {"path": "/projects", "query": {"filter": "(isActive=true)", "fields": "_internalId", "limit": 500}}, "reason": "Count active projects"}
+    {
+      "operation": "count",
+      "objectType": "projects",
+      "filters": { "isActive": true }
+    }
   ],
-  "intent": "count_projects"
+  "intent": "count_active_projects"
 }
 
-Q: "Show me risks for project 'Alpha'"
+Q: "Show me projects managed by user 5001"
 A: {
   "steps": [
-    {"tool": "get_schema", "params": {"objectName": "projects"}, "reason": "Learn project schema"},
-    {"tool": "call_endpoint", "params": {"path": "/projects", "query": {"filter": "(name='Alpha')", "fields": "_internalId,name"}}, "reason": "Find project ID"},
-    {"tool": "get_schema", "params": {"objectName": "risks"}, "reason": "Learn risk schema"},
-    {"tool": "call_endpoint", "params": {"path": "/projects/ID_FROM_STEP_2/risks", "query": {"fields": "FIELDS_FROM_STEP_3", "limit": 50}}, "reason": "Get project risks"}
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "manager": 5001 },
+      "fields": ["name", "code", "status", "scheduleStart", "scheduleFinish"],
+      "limit": 50
+    }
   ],
-  "intent": "list_risks"
+  "intent": "list_projects_by_manager"
 }
 
-Q: "List submitted timesheets"
+Q: "List tasks for project 5003001"
 A: {
   "steps": [
-    {"tool": "get_schema", "params": {"objectName": "timesheets"}, "reason": "Learn timesheet schema"},
-    {"tool": "call_endpoint", "params": {"path": "/timesheets", "query": {"filter": "(status='SUBMITTED')", "fields": "FIELDS_FROM_STEP_1", "limit": 50}}, "reason": "Query submitted timesheets"}
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "_internalId": 5003001 },
+      "childType": "tasks",
+      "fields": ["name", "status", "percentComplete", "assignedTo"]
+    }
   ],
-  "intent": "list_timesheets"
+  "intent": "list_project_tasks"
 }
 
-Q: "Show me time entries for timesheet 5001000"
+Q: "Show task updates from January"
 A: {
   "steps": [
-    {"tool": "get_schema", "params": {"objectName": "timeEntries"}, "reason": "Learn time entry schema"},
-    {"tool": "call_endpoint", "params": {"path": "/timesheets/5001000/timeEntries", "query": {"fields": "FIELDS_FROM_STEP_1"}}, "reason": "Get time entries"}
+    {
+      "operation": "list",
+      "objectType": "custTaskUpdates",
+      "filters": { "updateDate": ">= '2025-01-01T00:00:00'" },
+      "limit": 50
+    }
   ],
-  "intent": "list_time_entries"
+  "intent": "list_task_updates"
+}
+
+Q: "Show OBA tasks for investment 5003001"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "obaInvestments",
+      "filters": { "_internalId": 5003001 },
+      "childType": "obaTasks",
+      "limit": 100
+    }
+  ],
+  "intent": "list_oba_tasks"
 }
 
 User Query: "${message}"
 
-Respond with a JSON execution plan only. No explanations.`;
+Respond ONLY with the JSON execution plan. No explanations.`;
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -368,7 +528,6 @@ Respond with a JSON execution plan only. No explanations.`;
         model: 'claude-sonnet-4-20250514',
         max_tokens: 2000,
         messages: [
-          ...history.slice(-3),
           { role: 'user', content: systemPrompt }
         ]
       })
@@ -376,191 +535,147 @@ Respond with a JSON execution plan only. No explanations.`;
     
     if (!response.ok) {
       console.error('[AI] API Error:', response.status);
-      return simplePatternMatch(message);
+      return fallbackAnalysis(message);
     }
     
     const data = await response.json();
-    
-    // Safely access content
-    if (!data.content || !Array.isArray(data.content) || data.content.length === 0) {
-      console.error('[AI] Invalid response structure:', data);
-      return simplePatternMatch(message);
-    }
-    
     const content = data.content[0].text;
-    console.log('[AI] Raw response:', content.substring(0, 200));
     
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const plan = JSON.parse(jsonMatch[0]);
-      console.log('[AI] Parsed plan with', plan.steps?.length || 0, 'steps');
+      console.log('[AI] Generated plan:', JSON.stringify(plan, null, 2));
       return plan;
     }
     
-    console.warn('[AI] Could not parse JSON, using fallback');
-    return simplePatternMatch(message);
+    console.warn('[AI] Could not parse JSON');
+    return fallbackAnalysis(message);
     
   } catch (error) {
     console.error('[AI] Error:', error);
-    return simplePatternMatch(message);
+    return fallbackAnalysis(message);
   }
 }
+
+function fallbackAnalysis(message: string): any {
+  const lower = message.toLowerCase();
+  
+  if (/how many.*project/i.test(lower)) {
+    return {
+      steps: [{
+        operation: 'count',
+        objectType: 'projects',
+        filters: /active/.test(lower) ? { isActive: true } : {}
+      }],
+      intent: 'count_projects'
+    };
+  }
+  
+  if (/(show|list).*project/i.test(lower)) {
+    return {
+      steps: [{
+        operation: 'list',
+        objectType: 'projects',
+        filters: /active/.test(lower) ? { isActive: true } : {},
+        limit: 50
+      }],
+      intent: 'list_projects'
+    };
+  }
+  
+  return {
+    steps: [],
+    message: "I'm not sure how to help with that. Try asking about projects, tasks, or resources.",
+    intent: 'unknown'
+  };
 }
 
 // ============================================================================
 // EXECUTION ENGINE
 // ============================================================================
 
-async function executeplan(plan: any): Promise<any> {
-  if (!plan.steps || !Array.isArray(plan.steps)) {
-    throw new Error('Invalid plan: missing steps array');
+async function executePlan(plan: any): Promise<any> {
+  if (!plan.steps || !Array.isArray(plan.steps) || plan.steps.length === 0) {
+    return {
+      success: false,
+      message: plan.message || "No steps to execute"
+    };
   }
 
-  let context: any = {};
-  let finalResult: any = null;
+  const results: any[] = [];
   
   for (let i = 0; i < plan.steps.length; i++) {
     const step = plan.steps[i];
-    const stepNum = i + 1;
-    console.log(`\n[Step ${stepNum}] ${step.tool}: ${step.reason}`);
+    console.log(`\n[Step ${i + 1}/${plan.steps.length}] ${step.operation} on ${step.objectType}`);
     
     try {
-      let params = JSON.parse(JSON.stringify(step.params || {}));
+      // Build intelligent query
+      const { path, query, metadata } = await buildIntelligentQuery(step);
       
-      // Replace ID placeholders
-      Object.keys(params).forEach(key => {
-        const value = params[key];
-        
-        // Single ID: ID_FROM_STEP_X
-        if (typeof value === 'string' && value.startsWith('ID_FROM_STEP_')) {
-          const sourceStep = parseInt(value.split('_')[3]);
-          const sourceResult = context[`step${sourceStep}`];
-          if (sourceResult?._results?.[0]?._internalId) {
-            params[key] = sourceResult._results[0]._internalId;
-            console.log(`[Replaced] ${value} → ${params[key]}`);
-          }
-        }
-        
-        // Array of IDs: ALL_IDS_FROM_STEP_X
-        if (typeof value === 'string' && value.includes('ALL_IDS_FROM_STEP_')) {
-          const sourceStep = parseInt(value.split('_')[4]);
-          const sourceResult = context[`step${sourceStep}`];
-          if (sourceResult?._results) {
-            params[key] = sourceResult._results.map((r: any) => r._internalId).filter(Boolean);
-            console.log(`[Replaced] ${value} → ${params[key].length} IDs`);
-          }
-        }
-        
-        // Fields from schema: FIELDS_FROM_STEP_X
-        const isFieldPlaceholder = (typeof value === 'string' && value.includes('FIELDS_FROM_STEP_')) ||
-                                  (Array.isArray(value) && value[0]?.includes('FIELDS_FROM_STEP_'));
-        
-        if (isFieldPlaceholder) {
-          const valStr = Array.isArray(value) ? value[0] : value;
-          const sourceStep = parseInt(valStr.split('_')[3]);
-          const sourceResult = context[`step${sourceStep}`];
-          
-          if (sourceResult?._results) {
-            const schema = sourceResult._results;
-            const isCountQuery = plan.intent?.startsWith('count_');
-            
-            if (isCountQuery) {
-              params[key] = ['_internalId'];
-            } else {
-              const fields = schema
-                .filter((f: any) => {
-                  const name = f.apiName || f.name || '';
-                  return name !== 'attachment' && (!name.startsWith('_') || name === '_internalId');
-                })
-                .slice(0, 10)
-                .map((f: any) => f.apiName || f.name)
-                .filter(Boolean);
-              
-              if (!fields.includes('_internalId')) fields.unshift('_internalId');
-              if (!fields.includes('name') && schema.some((f: any) => f.apiName === 'name')) {
-                fields.splice(1, 0, 'name');
-              }
-              
-              params[key] = fields;
-            }
-            console.log(`[Replaced] ${valStr} → ${params[key].join(',')}`);
-          }
-        }
-        
-        // Replace IDs in path: /projects/ID_FROM_STEP_2/risks
-        if (key === 'path' && typeof params[key] === 'string') {
-          params[key] = params[key].replace(/ID_FROM_STEP_(\d+)/g, (match: string, stepNumStr: string) => {
-            const sourceStep = parseInt(stepNumStr);
-            const sourceResult = context[`step${sourceStep}`];
-            const id = sourceResult?._results?.[0]?._internalId;
-            console.log(`[Replaced in path] ${match} → ${id}`);
-            return id || match;
-          });
-        }
+      // Execute query
+      const queryString = new URLSearchParams(
+        Object.entries(query).map(([k, v]) => [k, String(v)])
+      ).toString();
+      
+      const result = await makeRequest(`${path}?${queryString}`);
+      
+      results.push({
+        step: i + 1,
+        operation: step.operation,
+        objectType: step.objectType,
+        result,
+        recordCount: result._totalCount || result._results?.length || 0
       });
       
-      // Execute tool
-      let result: any;
-      
-      if (step.tool === 'get_schema') {
-        result = await getObjectSchema(params.objectName);
-        
-      } else if (step.tool === 'call_endpoint') {
-        let path = params.path;
-        let queryStr = '';
-        
-        if (params.query) {
-          const queryParams = new URLSearchParams();
-          Object.entries(params.query).forEach(([k, v]: [string, any]) => {
-            if (Array.isArray(v)) {
-              queryParams.append(k, v.join(','));
-            } else {
-              queryParams.append(k, String(v));
-            }
-          });
-          queryStr = `?${queryParams.toString()}`;
-        }
-        
-        result = await makeRequest(path + queryStr, params.method || 'GET', params.body);
-      }
-      
-      context[`step${stepNum}`] = result;
-      finalResult = result;
-      
-      console.log(`[Step ${stepNum}] Result: ${result._totalCount || result._results?.length || 'N/A'} records`);
+      console.log(`[Step ${i + 1}] Success: ${result._totalCount || result._results?.length || 0} records`);
       
     } catch (error) {
-      console.error(`[Step ${stepNum}] Failed:`, error);
-      throw new Error(`Step ${stepNum} failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[Step ${i + 1}] Failed:`, error);
+      results.push({
+        step: i + 1,
+        error: error instanceof Error ? error.message : String(error)
+      });
     }
   }
   
-  return { finalResult, context, plan };
+  return {
+    success: true,
+    results,
+    plan
+  };
 }
 
 // ============================================================================
 // FORMAT RESPONSE
 // ============================================================================
 
-function formatResponse(result: any, plan: any): string {
-  const count = result._totalCount || result._results?.length || 0;
-  const intent = plan.intent || '';
+function formatResponse(execution: any): string {
+  if (!execution.success) {
+    return `❌ ${execution.message || 'Execution failed'}`;
+  }
   
-  // Count queries
-  if (intent.startsWith('count_')) {
-    const objectType = intent.replace('count_', '').replace('_', ' ');
+  const finalResult = execution.results[execution.results.length - 1];
+  
+  if (!finalResult || !finalResult.result) {
+    return '❌ No results';
+  }
+  
+  const count = finalResult.recordCount || 0;
+  const operation = finalResult.operation;
+  const objectType = finalResult.objectType;
+  
+  if (operation === 'count') {
     return `📊 **Found ${count} ${objectType}**`;
   }
   
-  // List queries
   if (count === 0) {
-    return `❌ No results found`;
+    return `❌ No ${objectType} found`;
   }
   
-  let reply = `✅ **Found ${count} records**\n\n`;
+  let reply = `✅ **Found ${count} ${objectType}**\n\n`;
   
-  if (result._results && result._results.length > 0) {
-    const items = result._results.slice(0, 15).map((item: any, i: number) => {
+  if (finalResult.result._results && finalResult.result._results.length > 0) {
+    const items = finalResult.result._results.slice(0, 15).map((item: any, i: number) => {
       const name = item.name || item.code || item.uniqueName || item._internalId;
       const status = item.status?.displayValue || item.status || '';
       const extra = status ? ` (${status})` : '';
@@ -581,17 +696,54 @@ function formatResponse(result: any, plan: any): string {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '3.0.0-swagger-dynamic',
+    version: '4.0.0-enhanced-intelligent-describe',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
-      hasAI: !!process.env.ANTHROPIC_API_KEY
+      hasAI: !!process.env.ANTHROPIC_API_KEY,
+      cacheSize: metadataCache.size
     }
   });
 });
 
+app.get('/api/discover', async (req, res) => {
+  try {
+    const objects = await discoverAllObjects();
+    res.json({
+      success: true,
+      objects,
+      count: objects.length
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.get('/api/metadata/:objectName', async (req, res) => {
+  try {
+    const { objectName } = req.params;
+    const forceRefresh = req.query.refresh === 'true';
+    
+    const metadata = await getObjectMetadata(objectName, forceRefresh);
+    
+    res.json({
+      success: true,
+      metadata,
+      filterPattern: detectObjectFilterPattern(objectName)
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 app.post('/api/chat', async (req, res) => {
-  const { message, conversationHistory, clarityBaseUrl, claritySessionId } = req.body;
+  const { message, clarityBaseUrl, claritySessionId } = req.body;
   
   console.log(`\n[Chat] User: "${message}"`);
   
@@ -604,50 +756,26 @@ app.post('/api/chat', async (req, res) => {
   }
   
   try {
-    const plan = await analyzeIntentWithClaude(message, conversationHistory || []);
+    // Analyze request with AI
+    const plan = await analyzeUserRequest(message);
     
-    console.log('[Chat] Received plan:', JSON.stringify(plan, null, 2));
+    // Execute plan
+    const execution = await executePlan(plan);
     
-    // Check for errors in plan generation
-    if (plan.action === 'error' || plan.error) {
-      return res.json({
-        success: false,
-        reply: `❌ AI Error: ${plan.message || plan.error || 'Unknown error'}`,
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    // Handle greetings and empty plans
-    if (!plan.steps || !Array.isArray(plan.steps) || plan.steps.length === 0) {
-      return res.json({
-        success: true,
-        reply: plan.message || "👋 Hello! I can query ANY Clarity PPM object dynamically. Just ask naturally!",
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    console.log(`[Chat] Executing ${plan.steps.length} steps...`);
-    
-    const { finalResult, context, plan: executedPlan } = await executeplan(plan);
-    const reply = formatResponse(finalResult, executedPlan);
+    // Format response
+    const reply = formatResponse(execution);
     
     res.json({
       success: true,
       reply,
-      data: finalResult,
-      _debug: { plan: executedPlan, stepsExecuted: plan.steps.length },
+      data: execution.results[execution.results.length - 1]?.result,
+      _debug: { plan, execution },
       timestamp: new Date().toISOString()
     });
     
   } catch (error) {
     console.error('[Chat] Error:', error);
     res.json({
-      success: false,
-      reply: `❌ Error: ${error instanceof Error ? error.message : String(error)}`,
-      _debug: { error: String(error) },
-      timestamp: new Date().toISOString()
-    });
-  }
       success: false,
       reply: `❌ Error: ${error instanceof Error ? error.message : String(error)}`,
       timestamp: new Date().toISOString()
@@ -661,13 +789,15 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Dynamic Swagger Server v3.0.0');
+  console.log('🚀 Clarity PPM Enhanced Intelligent Describe Server v4.0.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
   console.log(`🤖 AI Agent: ${process.env.ANTHROPIC_API_KEY ? 'Enabled' : 'Disabled'}`);
   console.log('======================================================================');
   console.log(`Health: http://localhost:${PORT}/health`);
+  console.log(`Discover: GET http://localhost:${PORT}/api/discover`);
+  console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
 });
