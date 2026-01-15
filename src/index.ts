@@ -89,7 +89,7 @@ async function makeRequest(
     const auth = Buffer.from(`${config.username}:${config.password}`).toString('base64');
     requestHeaders['Authorization'] = `Basic ${auth}`;
   } else if (config.sessionId) {
-    requestHeaders['Cookie'] = `JSESSIONID=${config.sessionId}`;
+    requestHeaders['Cookie'] = `sessionId=${config.sessionId}`;
   }
 
   const options: RequestInit = {
