@@ -1142,11 +1142,15 @@ app.post('/api/chat', async (req, res) => {
                   processed++;
                   
                   if (processed % 10 === 0) {
-                    console.log(`[AI Agent] Processed ${processed}/${params.projectId.length} projects...`);
+                    console.log(`[AI Agent] Processed ${processed}/${params.projectId.length} projects, ${totalCount} tasks so far...`);
                   }
                 } catch (err) {
                   // Skip projects with no tasks or errors
-                  console.log(`[AI Agent] Skipped project ${projId}: ${err}`);
+                  const errorMsg = err instanceof Error ? err.message : String(err);
+                  if (!errorMsg.includes('404')) {
+                    console.log(`[AI Agent] Error on project ${projId}: ${errorMsg}`);
+                  }
+                  processed++;
                 }
               }
               
@@ -1316,11 +1320,6 @@ app.post('/api/chat', async (req, res) => {
       }
       
       // For list queries, show the items
-      let reply = `Found ${count} results.`;
-        });
-      }
-      
-      // For other queries, show the list
       let reply = `Found ${count} results.`;
       
       if (finalResult._results && finalResult._results.length > 0) {
