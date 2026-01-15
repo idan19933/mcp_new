@@ -660,12 +660,34 @@ A: {
       "parentId": "STEP_1_ID",
       "childType": "tasks",
       "data": {
-        "name": "Setup",
-        "taskType": "task"
+        "name": "Setup"
       }
     }
   ],
   "intent": "create_task_in_project"
+}
+
+Q: "Create a task named Design with 5 days duration in project Beta"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "name": "Beta" },
+      "fields": ["_internalId", "name"]
+    },
+    {
+      "operation": "create",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
+      "data": {
+        "name": "Design",
+        "durationDays": 5
+      }
+    }
+  ],
+  "intent": "create_task_with_duration"
 }
 
 Q: "Update project 5003001 to set status as Active"
@@ -690,6 +712,8 @@ A: {
 4. Always include _internalId in project lookup steps
 5. For CREATE operations - Use "data" field with required attributes
 6. For UPDATE operations - Use "recordId" and "data" with fields to update
+7. For creating TASKS - Only "name" is required. Optional: durationDays, percentComplete, startDate, finishDate
+8. For creating PROJECTS - "name" and "code" are required. Optional: status, manager, scheduleStart, scheduleFinish
 
 User Query: "${message}"
 
