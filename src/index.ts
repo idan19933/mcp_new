@@ -346,7 +346,29 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
   
   // Handle UPDATE operation
   if (intent.operation === 'update' && intent.recordId) {
-    path = `/${intent.objectType}/${intent.recordId}`;
+    let actualRecordId = intent.recordId;
+    
+    // Check if recordId is a reference to previous step
+    if (typeof actualRecordId === 'string' && actualRecordId.includes('STEP_')) {
+      const stepMatch = actualRecordId.match(/STEP_(\d+)_ID/);
+      if (stepMatch && previousResults) {
+        const stepIndex = parseInt(stepMatch[1]) - 1;
+        const previousResult = previousResults[stepIndex];
+        
+        // Extract ID from previous result
+        if (previousResult?.result?._internalId) {
+          // Single record created/updated
+          actualRecordId = previousResult.result._internalId;
+          console.log(`[QueryBuilder] Resolved ${intent.recordId} to ${actualRecordId}`);
+        } else if (previousResult?.result?._results?.[0]?._internalId) {
+          // List result - get first record
+          actualRecordId = previousResult.result._results[0]._internalId;
+          console.log(`[QueryBuilder] Resolved ${intent.recordId} to ${actualRecordId}`);
+        }
+      }
+    }
+    
+    path = `/${intent.objectType}/${actualRecordId}`;
     method = 'PATCH';
     body = intent.data || {};
     return { path, query: {}, metadata, method, body };
@@ -705,15 +727,46 @@ A: {
   "intent": "update_project_status"
 }
 
+Q: "Create a task named Test and set it to 50% complete"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "code": "PROJECT_CODE" },
+      "fields": ["_internalId"]
+    },
+    {
+      "operation": "create",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
+      "data": {
+        "name": "Test"
+      }
+    },
+    {
+      "operation": "update",
+      "objectType": "tasks",
+      "recordId": "STEP_2_ID",
+      "data": {
+        "percentComplete": 50
+      }
+    }
+  ],
+  "intent": "create_and_update_task"
+}
+
 **IMPORTANT RULES:**
 1. For "how many X in project Y" - Use TWO steps: find project, then count its children
 2. For distributions/grouping - List all items with status field, client will group
 3. Use parentId: "STEP_1_ID" to reference previous step results
-4. Always include _internalId in project lookup steps
-5. For CREATE operations - Use "data" field with required attributes
-6. For UPDATE operations - Use "recordId" and "data" with fields to update
-7. For creating TASKS - Only "name" is required. Optional: durationDays, percentComplete, startDate, finishDate
-8. For creating PROJECTS - "name" and "code" are required. Optional: status, manager, scheduleStart, scheduleFinish
+4. Use recordId: "STEP_X_ID" to update a record from a previous step
+5. Always include _internalId in project lookup steps
+6. For CREATE operations - Use "data" field with required attributes
+7. For UPDATE operations - Use "recordId" and "data" with fields to update
+8. For creating TASKS - Only "name" is required. Optional: durationDays, percentComplete, startDate, finishDate
+9. For creating PROJECTS - "name" and "code" are required. Optional: status, manager, scheduleStart, scheduleFinish
 
 User Query: "${message}"
 
