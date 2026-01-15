@@ -325,7 +325,7 @@ interface QueryIntent {
   limit?: number;
 }
 
-async function buildIntelligentQuery(intent: QueryIntent): Promise<any> {
+async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[]): Promise<any> {
   console.log('[QueryBuilder] Building query for:', JSON.stringify(intent, null, 2));
   
   // Get metadata
@@ -337,7 +337,22 @@ async function buildIntelligentQuery(intent: QueryIntent): Promise<any> {
   
   // Handle parent-child relationships
   if (intent.parentId && intent.childType) {
-    path = `/${intent.objectType}/${intent.parentId}/${intent.childType}`;
+    // Check if parentId is a reference to previous step
+    let actualParentId = intent.parentId;
+    if (typeof actualParentId === 'string' && actualParentId.includes('STEP_')) {
+      // Extract step number (e.g., "STEP_1_ID" -> step 1)
+      const stepMatch = actualParentId.match(/STEP_(\d+)_ID/);
+      if (stepMatch && previousResults) {
+        const stepIndex = parseInt(stepMatch[1]) - 1;
+        const previousResult = previousResults[stepIndex];
+        if (previousResult?.result?._results?.[0]?._internalId) {
+          actualParentId = previousResult.result._results[0]._internalId;
+          console.log(`[QueryBuilder] Resolved ${intent.parentId} to ${actualParentId}`);
+        }
+      }
+    }
+    
+    path = `/${intent.objectType}/${actualParentId}/${intent.childType}`;
     
     // Get child metadata
     const childMetadata = await getObjectMetadata(intent.childType);
@@ -512,6 +527,73 @@ A: {
   "intent": "list_oba_tasks"
 }
 
+Q: "How many tasks in project Alpha"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "name": "Alpha" },
+      "fields": ["_internalId", "name"]
+    },
+    {
+      "operation": "count",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks"
+    }
+  ],
+  "intent": "count_project_tasks"
+}
+
+Q: "Show task status distribution for project this_proj"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "code": "this_proj" },
+      "fields": ["_internalId", "name"]
+    },
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
+      "fields": ["status", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "task_status_distribution"
+}
+
+Q: "How many tasks in each status for project X"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "code": "X" },
+      "fields": ["_internalId", "name"]
+    },
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
+      "fields": ["status", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "tasks_by_status"
+}
+
+**IMPORTANT RULES:**
+1. For "how many X in project Y" - Use TWO steps: find project, then count its children
+2. For distributions/grouping - List all items with status field, client will group
+3. Use parentId: "STEP_1_ID" to reference previous step results
+4. Always include _internalId in project lookup steps
+
 User Query: "${message}"
 
 Respond ONLY with the JSON execution plan. No explanations.`;
@@ -611,8 +693,8 @@ async function executePlan(plan: any): Promise<any> {
     console.log(`\n[Step ${i + 1}/${plan.steps.length}] ${step.operation} on ${step.objectType}`);
     
     try {
-      // Build intelligent query
-      const { path, query, metadata } = await buildIntelligentQuery(step);
+      // Build intelligent query with access to previous results
+      const { path, query, metadata } = await buildIntelligentQuery(step, results);
       
       // Execute query
       const queryString = new URLSearchParams(
@@ -665,7 +747,9 @@ function formatResponse(execution: any): string {
   const count = finalResult.recordCount || 0;
   const operation = finalResult.operation;
   const objectType = finalResult.objectType;
+  const intent = execution.plan?.intent || '';
   
+  // Handle count operations
   if (operation === 'count') {
     return `📊 **Found ${count} ${objectType}**`;
   }
@@ -674,6 +758,28 @@ function formatResponse(execution: any): string {
     return `❌ No ${objectType} found`;
   }
   
+  // Handle distribution/grouping intents
+  if (intent.includes('distribution') || intent.includes('by_status') || intent.includes('grouped')) {
+    const items = finalResult.result._results || [];
+    
+    // Group by status
+    const grouped: Record<string, number> = {};
+    items.forEach((item: any) => {
+      const status = item.status?.displayValue || item.status || 'Unknown';
+      grouped[status] = (grouped[status] || 0) + 1;
+    });
+    
+    let reply = `📊 **Task Distribution (${count} total)**\n\n`;
+    Object.entries(grouped)
+      .sort(([, a], [, b]) => b - a)
+      .forEach(([status, taskCount]) => {
+        reply += `• **${status}**: ${taskCount} tasks\n`;
+      });
+    
+    return reply;
+  }
+  
+  // Standard list response
   let reply = `✅ **Found ${count} ${objectType}**\n\n`;
   
   if (finalResult.result._results && finalResult.result._results.length > 0) {
