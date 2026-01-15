@@ -433,11 +433,14 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
       : `(${filterParts.join(' and ')})`;
   }
   
-  // Set limit
-  if (intent.limit) {
-    query.limit = Math.min(intent.limit, 500);
-  } else if (intent.operation !== 'create' && intent.operation !== 'update' && typeof query.limit === 'undefined') {
-    query.limit = intent.operation === 'count' ? 500 : 50;
+  // Set limit (only for non-create/update operations)
+  const needsLimit = intent.operation !== 'create' && intent.operation !== 'update';
+  if (needsLimit) {
+    if (intent.limit) {
+      query.limit = Math.min(intent.limit, 500);
+    } else if (!query.limit) {
+      query.limit = intent.operation === 'count' ? 500 : 50;
+    }
   }
   
   return { path, query, metadata, method, body };
