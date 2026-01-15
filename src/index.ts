@@ -99,15 +99,22 @@ async function makeRequest(
   }
 
   console.log(`[Clarity API] ${method} ${url}`);
+  console.log(`[Clarity API] Auth: ${config.authToken ? 'Token' : config.username ? 'Basic' : 'Session'}`);
 
-  const response = await fetch(url, options);
-  const text = await response.text();
+  try {
+    const response = await fetch(url, options);
+    const text = await response.text();
 
-  if (!response.ok) {
-    throw new Error(`API Error ${response.status}: ${text}`);
+    if (!response.ok) {
+      console.error(`[Clarity API] Error ${response.status}: ${text.substring(0, 200)}`);
+      throw new Error(`Clarity API returned ${response.status}. Check: 1) Base URL is correct (${config.baseUrl}), 2) Auth credentials are valid`);
+    }
+
+    return text ? JSON.parse(text) : null;
+  } catch (error) {
+    console.error(`[Clarity API] Request failed:`, error);
+    throw error;
   }
-
-  return text ? JSON.parse(text) : null;
 }
 
 // ============================================================================
@@ -363,11 +370,17 @@ async function handleExecuteCustomQuery(args: {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    version: '2.0.0',
+    version: '2.0.0-smart-agent',
     tools: 17,
     config: {
       baseUrl: config.baseUrl,
+      authType: config.authToken ? 'Token' : config.username ? 'Basic Auth' : config.sessionId ? 'Session' : 'None',
       hasAuth: !!(config.authToken || config.username || config.sessionId)
+    },
+    endpoints: {
+      chat: 'POST /api/chat',
+      tool: 'POST /api/tool',
+      objects: 'GET /api/objects'
     }
   });
 });
