@@ -433,13 +433,11 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
       : `(${filterParts.join(' and ')})`;
   }
   
-  // Set limit (only for non-create/update operations)
-  if (intent.operation === 'count' || intent.operation === 'list' || intent.operation === 'get') {
-    if (intent.limit) {
-      query.limit = Math.min(intent.limit, 500);
-    } else if (!query.limit) {
-      query.limit = intent.operation === 'count' ? 500 : 50;
-    }
+  // Set limit (create/update operations already returned above)
+  if (intent.limit) {
+    query.limit = Math.min(intent.limit, 500);
+  } else if (!query.limit) {
+    query.limit = intent.operation === 'count' ? 500 : 50;
   }
   
   return { path, query, metadata, method, body };
