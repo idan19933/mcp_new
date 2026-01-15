@@ -732,18 +732,19 @@ async function analyzeIntentWithClaude(message: string, conversationHistory: any
   }
 
   try {
-    const systemPrompt = `You are a Clarity PPM assistant that creates execution plans using Clarity REST API.
+    const systemPrompt = `You are a Clarity PPM assistant that creates SMART execution plans using Clarity REST API.
 
 Available Clarity API calls:
 1. query_projects - Query projects
-   Fields: name, code, manager, status, percentComplete, isActive, scheduleStart, scheduleFinish
+   Fields: name, code, manager, status, percentComplete, isActive, scheduleStart, scheduleFinish, _internalId
    **IMPORTANT: Use "_internalId" not "id" - the "id" field is not supported!**
    Filter: Use "isActive" (not "active") for active projects: (isActive = true)
    Limit: Maximum 500 (not 1000!)
 
-2. get_project_tasks - Get tasks for a project (requires projectId which is _internalId from step 1)
+2. get_project_tasks - Get tasks for a project (requires projectId which is _internalId)
    Fields: name, status, percentComplete, start, finish, code
    Limit: Maximum 500
+   **Can handle MULTIPLE projectIds as array: projectId: ["5001", "5002", "5003"]**
 
 3. get_project_teams - Get team members (requires projectId)
    Fields: resourceId, role, allocationPercentage
@@ -753,24 +754,91 @@ Available Clarity API calls:
 - Maximum limit is 500, not 1000
 - Project code filter: (code = 'value')
 - For greetings/help, return empty steps array
+- **BE SMART: You CAN query tasks across multiple/all projects by iterating!**
 
-When user asks about tasks/teams in a project:
-- Step 1: query_projects with filter (code = 'PROJECT_CODE') and fields ["_internalId", "name", "code"] to get project ID
-- Step 2: Extract _internalId from step 1 result
-- Step 3: Use _internalId in get_project_tasks or get_project_teams
+**SMART Multi-Project Task Counting:**
+When user asks "how many tasks in total" or "count all tasks":
+Step 1: Get ALL project IDs
+  - query_projects with fields=["_internalId", "name", "code"] and limit=500
+  - Extract ALL _internalId values into array
+Step 2: Query tasks for EACH project using the ID array
+  - get_project_tasks with projectId: "ALL_IDS_FROM_STEP_1"
+  - System will iterate through each project ID automatically
+  - System will sum up all task counts
 
-Examples:
+**Pattern Recognition - Be Smart About User Intent:**
+
+1. **Count queries** (show COUNT only):
+   - "how many [X]"
+   - "count [X]"
+   - "total [X]"
+   - "number of [X]"
+
+2. **List queries** (show ITEMS):
+   - "show me [X]"
+   - "list [X]"
+   - "display [X]"
+   - "get [X]"
+
+3. **Specific project queries**:
+   - "in [PROJECT_CODE]"
+   - "for [PROJECT_CODE]"
+   - "project [PROJECT_CODE]"
+
+4. **All projects queries**:
+   - "in total"
+   - "across all projects"
+   - "all tasks"
+   - "total tasks"
+
+**Smart Examples:**
+
+Q: "how many tasks in total"
+A: {"steps": [
+  {"tool": "query_projects", "params": {"fields": ["_internalId", "name"], "limit": 500}, "reason": "Get all project IDs"},
+  {"tool": "get_project_tasks", "params": {"projectId": "ALL_IDS_FROM_STEP_1", "fields": ["name"]}, "reason": "Count tasks in each project and sum"}
+], "intent": "count_total_tasks"}
+
+Q: "how many active projects"
+A: {"steps": [
+  {"tool": "query_projects", "params": {"filter": "(isActive = true)", "fields": ["_internalId", "name"], "limit": 500}, "reason": "Count active projects"}
+], "intent": "count_projects"}
+
 Q: "show active projects"
-A: {"steps": [{"tool": "query_projects", "params": {"filter": "(isActive = true)", "fields": ["name", "code", "status"], "limit": 50}}]}
+A: {"steps": [
+  {"tool": "query_projects", "params": {"filter": "(isActive = true)", "fields": ["name", "code", "status", "manager"], "limit": 50}, "reason": "List active projects"}
+], "intent": "list_projects"}
 
 Q: "how many tasks in this_proj"
 A: {"steps": [
   {"tool": "query_projects", "params": {"filter": "(code = 'this_proj')", "fields": ["_internalId", "name"]}, "reason": "Find project ID"},
-  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1", "fields": ["name"]}, "reason": "Get all tasks"}
-]}
+  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1", "fields": ["name"]}, "reason": "Count tasks"}
+], "intent": "count_project_tasks"}
 
-Q: "hi"
-A: {"steps": [], "message": "Hello! How can I help you with Clarity PPM?"}
+Q: "list all teams across projects"
+A: {"steps": [
+  {"tool": "query_projects", "params": {"fields": ["_internalId", "name"], "limit": 500}, "reason": "Get all project IDs"},
+  {"tool": "get_project_teams", "params": {"projectId": "ALL_IDS_FROM_STEP_1", "fields": ["resourceId", "role"]}, "reason": "Get teams from all projects"}
+], "intent": "list_all_teams"}
+
+Q: "show me completed tasks in alpha_proj"
+A: {"steps": [
+  {"tool": "query_projects", "params": {"filter": "(code = 'alpha_proj')", "fields": ["_internalId", "name"]}, "reason": "Find project ID"},
+  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1", "fields": ["name", "status", "percentComplete"]}, "reason": "Get tasks to filter completed ones"}
+], "intent": "list_completed_tasks"}
+
+Q: "hi" or "hello" or "help"
+A: {"steps": [], "message": "👋 Hello! I can help you with Clarity PPM. I'm smart enough to:\n• Count tasks across ALL projects\n• Count/list projects, tasks, teams\n• Query specific projects by code\n• And much more! Just ask naturally.", "intent": "greeting"}
+
+**Response Format:**
+Always include "intent" field to help with response formatting:
+- "count_total_tasks" - Sum tasks across all projects
+- "count_projects" - Count projects
+- "count_project_tasks" - Count tasks in specific project
+- "list_projects" - List projects
+- "list_tasks" - List tasks
+- "list_teams" - List team members
+- "greeting" - Greeting message
 
 Respond ONLY with valid JSON.`;
 
@@ -999,8 +1067,8 @@ app.post('/api/chat', async (req, res) => {
           Object.keys(params).forEach(key => {
             const value = params[key];
             
-            // Handle FROM_STEP_X pattern - extract _internalId
-            if (typeof value === 'string' && value.startsWith('FROM_STEP_')) {
+            // Handle FROM_STEP_X pattern - extract single _internalId
+            if (typeof value === 'string' && value.startsWith('FROM_STEP_') && !value.includes('ALL_IDS')) {
               const stepNum = parseInt(value.split('_')[2]);
               const stepResult = context[`step${stepNum}`];
               
@@ -1010,6 +1078,23 @@ app.post('/api/chat', async (req, res) => {
                 console.log(`[AI Agent] Replaced ${value} with: ${params[key]}`);
               } else {
                 throw new Error(`Could not extract ID from step ${stepNum}`);
+              }
+            }
+            
+            // Handle ALL_IDS_FROM_STEP_X pattern - extract array of all IDs
+            if (typeof value === 'string' && value.includes('ALL_IDS_FROM_STEP_')) {
+              const stepNum = parseInt(value.split('_')[3]);
+              const stepResult = context[`step${stepNum}`];
+              
+              if (stepResult && stepResult._results && stepResult._results.length > 0) {
+                // Extract all _internalId values
+                const allIds = stepResult._results
+                  .map((r: any) => r._internalId || r.id)
+                  .filter(Boolean);
+                params[key] = allIds;
+                console.log(`[AI Agent] Replaced ${value} with ${allIds.length} IDs`);
+              } else {
+                throw new Error(`Could not extract IDs from step ${stepNum}`);
               }
             }
           });
@@ -1033,19 +1118,103 @@ app.post('/api/chat', async (req, res) => {
             if (!params.projectId) {
               throw new Error('projectId is required for get_project_tasks');
             }
-            result = await handleGetProjectTasks({
-              projectId: params.projectId,
-              fields: params.fields || ['name', 'status', 'percentComplete'],
-              limit: Math.min(params.limit || 100, 500)
-            });
+            
+            // Handle array of project IDs - iterate and aggregate
+            if (Array.isArray(params.projectId)) {
+              console.log(`[AI Agent] Iterating through ${params.projectId.length} projects...`);
+              
+              let allTasks: any[] = [];
+              let totalCount = 0;
+              let processed = 0;
+              
+              for (const projId of params.projectId) {
+                try {
+                  const taskResult = await handleGetProjectTasks({
+                    projectId: projId,
+                    fields: params.fields || ['name', 'status', 'percentComplete'],
+                    limit: 500
+                  });
+                  
+                  if (taskResult._results) {
+                    allTasks = allTasks.concat(taskResult._results);
+                    totalCount += (taskResult._totalCount || taskResult._results.length || 0);
+                  }
+                  processed++;
+                  
+                  if (processed % 10 === 0) {
+                    console.log(`[AI Agent] Processed ${processed}/${params.projectId.length} projects...`);
+                  }
+                } catch (err) {
+                  // Skip projects with no tasks or errors
+                  console.log(`[AI Agent] Skipped project ${projId}: ${err}`);
+                }
+              }
+              
+              console.log(`[AI Agent] ✅ Aggregated ${totalCount} tasks from ${processed} projects`);
+              
+              result = {
+                _results: allTasks,
+                _totalCount: totalCount,
+                _pageSize: allTasks.length,
+                _recordsReturned: allTasks.length,
+                _aggregated: true,
+                _projectsProcessed: processed
+              };
+            } else {
+              // Single project ID
+              result = await handleGetProjectTasks({
+                projectId: params.projectId,
+                fields: params.fields || ['name', 'status', 'percentComplete'],
+                limit: Math.min(params.limit || 100, 500)
+              });
+            }
           } else if (step.tool === 'get_project_teams') {
             if (!params.projectId) {
               throw new Error('projectId is required for get_project_teams');
             }
-            result = await handleGetProjectTeams({
-              projectId: params.projectId,
-              fields: params.fields || ['resourceId', 'role']
-            });
+            
+            // Handle array of project IDs - iterate and aggregate
+            if (Array.isArray(params.projectId)) {
+              console.log(`[AI Agent] Iterating through ${params.projectId.length} projects for teams...`);
+              
+              let allTeams: any[] = [];
+              let totalCount = 0;
+              let processed = 0;
+              
+              for (const projId of params.projectId) {
+                try {
+                  const teamResult = await handleGetProjectTeams({
+                    projectId: projId,
+                    fields: params.fields || ['resourceId', 'role']
+                  });
+                  
+                  if (teamResult._results) {
+                    allTeams = allTeams.concat(teamResult._results);
+                    totalCount += (teamResult._totalCount || teamResult._results.length || 0);
+                  }
+                  processed++;
+                } catch (err) {
+                  console.log(`[AI Agent] Skipped project ${projId}: ${err}`);
+                }
+              }
+              
+              console.log(`[AI Agent] ✅ Aggregated ${totalCount} team members from ${processed} projects`);
+              
+              result = {
+                _results: allTeams,
+                _totalCount: totalCount,
+                _pageSize: allTeams.length,
+                _recordsReturned: allTeams.length,
+                _aggregated: true,
+                _projectsProcessed: processed
+              };
+            } else {
+              // Single project ID
+              result = await handleGetProjectTeams({
+                projectId: params.projectId,
+                fields: params.fields || ['resourceId', 'role']
+              });
+            }
           } else {
             throw new Error(`Unknown tool: ${step.tool}`);
           }
@@ -1084,6 +1253,74 @@ app.post('/api/chat', async (req, res) => {
       }
       
       const count = finalResult._totalCount || finalResult._results?.length || 0;
+      const userQuery = message.toLowerCase();
+      const intent = plan.intent || '';
+      const isAggregated = finalResult._aggregated;
+      const projectsProcessed = finalResult._projectsProcessed;
+      
+      // Smart response based on intent
+      if (intent === 'count_total_tasks' || (userQuery.includes('how many') && userQuery.includes('total') && userQuery.includes('task'))) {
+        let reply = `📊 **Found ${count} tasks in total**`;
+        if (isAggregated && projectsProcessed) {
+          reply += `\n\n✅ Scanned ${projectsProcessed} projects`;
+        }
+        
+        return res.json({
+          success: true,
+          reply: reply,
+          data: { count, totalCount: count, projectsProcessed },
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      if (intent === 'count_project_tasks' || (userQuery.includes('how many') && userQuery.includes('task') && !userQuery.includes('total'))) {
+        const projectName = context.step1?._results?.[0]?.name || 'Unknown';
+        const reply = `📊 Project **${projectName}** has **${count} tasks**`;
+        
+        return res.json({
+          success: true,
+          reply: reply,
+          data: { count, totalCount: count, projectName },
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      if (intent === 'count_projects' || (userQuery.includes('how many') && userQuery.includes('project'))) {
+        const reply = `📊 Found **${count} projects**`;
+        
+        return res.json({
+          success: true,
+          reply: reply,
+          data: { count, totalCount: count },
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Generic count query
+      if (userQuery.includes('how many') || userQuery.includes('count')) {
+        let reply = `📊 Found **${count}** items`;
+        
+        if (userQuery.includes('team')) {
+          reply = `📊 Found **${count} team members**`;
+          if (isAggregated && projectsProcessed) {
+            reply += ` across ${projectsProcessed} projects`;
+          }
+        }
+        
+        return res.json({
+          success: true,
+          reply: reply,
+          data: { count, totalCount: count, projectsProcessed },
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // For list queries, show the items
+      let reply = `Found ${count} results.`;
+        });
+      }
+      
+      // For other queries, show the list
       let reply = `Found ${count} results.`;
       
       if (finalResult._results && finalResult._results.length > 0) {
