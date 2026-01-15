@@ -110,6 +110,7 @@ interface AttributeMetadata {
   required: boolean;
   isLookup: boolean;
   lookupType?: string;
+  lookupValues?: Array<{ code: string; displayValue: string }>;  // Added for lookup resolution
   maxLength?: number;
   isCustom: boolean;
   actionType?: string;  // Added to track filter-only fields
@@ -117,6 +118,52 @@ interface AttributeMetadata {
 
 const metadataCache = new Map<string, ObjectMetadata>();
 const CACHE_TTL = 1000 * 60 * 15; // 15 minutes
+
+/**
+ * Resolves a human-readable lookup value to its API code
+ * E.g., "Completed" -> "C", "Active" -> "A"
+ */
+function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, displayValue: string): string {
+  const attribute = metadata.attributes.find(attr => attr.apiName === fieldName);
+  
+  if (!attribute || !attribute.isLookup || !attribute.lookupValues) {
+    return displayValue; // Not a lookup field or no values available
+  }
+  
+  // Try exact match first (case-insensitive)
+  const lowerDisplay = displayValue.toLowerCase();
+  const exactMatch = attribute.lookupValues.find(lv => 
+    lv.displayValue?.toLowerCase() === lowerDisplay
+  );
+  
+  if (exactMatch) {
+    console.log(`[LookupResolver] Resolved '${displayValue}' -> '${exactMatch.code}' for ${fieldName}`);
+    return exactMatch.code;
+  }
+  
+  // Try partial match
+  const partialMatch = attribute.lookupValues.find(lv =>
+    lv.displayValue?.toLowerCase().includes(lowerDisplay) ||
+    lowerDisplay.includes(lv.displayValue?.toLowerCase() || '')
+  );
+  
+  if (partialMatch) {
+    console.log(`[LookupResolver] Resolved '${displayValue}' -> '${partialMatch.code}' for ${fieldName} (partial match)`);
+    return partialMatch.code;
+  }
+  
+  // Check if it's already a code
+  const codeMatch = attribute.lookupValues.find(lv => lv.code === displayValue);
+  if (codeMatch) {
+    console.log(`[LookupResolver] '${displayValue}' is already a valid code for ${fieldName}`);
+    return displayValue;
+  }
+  
+  console.warn(`[LookupResolver] Could not resolve '${displayValue}' for ${fieldName}. Available values:`, 
+    attribute.lookupValues.map(lv => `${lv.code}=${lv.displayValue}`).join(', '));
+  
+  return displayValue; // Return as-is if no match
+}
 
 // ============================================================================
 // METADATA DISCOVERY - Using /describe and /describeAttributes
@@ -250,6 +297,7 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
       required: attr.required === true,
       isLookup: attr.dataType === 'lookup',
       lookupType: attr.lookupType,
+      lookupValues: attr.lookupValues || attr.validValues || [],  // Capture lookup values
       maxLength: attr.maxLength,
       isCustom: attr.isCustom === true,
       actionType: attr.actionType  // Capture if field is filterOnly/dataOnly
@@ -383,12 +431,29 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
         }
       }
       path = `/${intent.objectType}/${actualParentId}/${intent.childType}/${actualRecordId}`;
+      
+      // Get child metadata for lookup resolution
+      const childMetadata = await getObjectMetadata(intent.childType);
+      metadata.attributes = childMetadata.attributes;
     } else {
       path = `/${intent.objectType}/${actualRecordId}`;
     }
     
-    method = 'PATCH';
+    // Resolve lookup values in data
     body = intent.data || {};
+    if (body && typeof body === 'object') {
+      const resolvedBody: Record<string, any> = {};
+      for (const [key, value] of Object.entries(body)) {
+        if (typeof value === 'string') {
+          resolvedBody[key] = resolveLookupValue(metadata, key, value);
+        } else {
+          resolvedBody[key] = value;
+        }
+      }
+      body = resolvedBody;
+    }
+    
+    method = 'PATCH';
     return { path, query: {}, metadata, method, body };
   }
   
@@ -412,6 +477,23 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
         }
       }
       path = `/${intent.objectType}/${actualParentId}/${intent.childType}`;
+      
+      // Get child metadata for lookup resolution
+      const childMetadata = await getObjectMetadata(intent.childType);
+      metadata.attributes = childMetadata.attributes;
+    }
+    
+    // Resolve lookup values in data
+    if (body && typeof body === 'object') {
+      const resolvedBody: Record<string, any> = {};
+      for (const [key, value] of Object.entries(body)) {
+        if (typeof value === 'string') {
+          resolvedBody[key] = resolveLookupValue(metadata, key, value);
+        } else {
+          resolvedBody[key] = value;
+        }
+      }
+      body = resolvedBody;
     }
     
     return { path, query: {}, metadata, method, body };
