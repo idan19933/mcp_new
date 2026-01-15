@@ -732,113 +732,133 @@ async function analyzeIntentWithClaude(message: string, conversationHistory: any
   }
 
   try {
-    const systemPrompt = `You are a Clarity PPM assistant that creates SMART execution plans using Clarity REST API.
+    const systemPrompt = `You are an INTELLIGENT Clarity PPM assistant that ALWAYS discovers metadata before querying.
 
-Available Clarity API calls:
-1. query_projects - Query projects
-   Fields: name, code, manager, status, percentComplete, isActive, scheduleStart, scheduleFinish, _internalId
-   **IMPORTANT: Use "_internalId" not "id" - the "id" field is not supported!**
-   Filter: Use "isActive" (not "active") for active projects: (isActive = true)
-   Limit: Maximum 500 (not 1000!)
+**MANDATORY WORKFLOW - ALWAYS FOLLOW THIS ORDER:**
 
-2. get_project_tasks - Get tasks for a project (requires projectId which is _internalId)
-   Fields: name, status, percentComplete, start, finish, code
-   Limit: Maximum 500
-   **Can handle MULTIPLE projectIds as array: projectId: ["5001", "5002", "5003"]**
+**Step 1: DISCOVER Objects** (if object type unknown)
+- Use get_objects to see all available objects
+- Match user's request to actual object names
 
-3. get_project_teams - Get team members (requires projectId)
-   Fields: resourceId, role, allocationPercentage
+**Step 2: LEARN Schema** (for ANY query on an object)
+- ALWAYS use get_object_attributes(objectName) FIRST
+- Learn available fields, their types, and constraints
+- Understand which fields can be filtered
+
+**Step 3: EXECUTE Query** (with discovered schema)
+- Use query_object with fields from Step 2
+- Apply filters based on available fields
+- Return results
 
 **CRITICAL RULES:**
-- ALWAYS use "_internalId" to get project IDs, NEVER "id"
-- Maximum limit is 500, not 1000
-- Project code filter: (code = 'value')
-- For greetings/help, return empty steps array
-- **BE SMART: You CAN query tasks across multiple/all projects by iterating!**
+- NEVER assume field names - ALWAYS discover them first with get_object_attributes
+- ALWAYS use "_internalId" for IDs (never "id")
+- Maximum limit is 500
+- Use proper filter syntax: (fieldName = 'value')
+- For multi-record operations, extract IDs and iterate
 
-**SMART Multi-Project Task Counting:**
-When user asks "how many tasks in total" or "count all tasks":
-Step 1: Get ALL project IDs
-  - query_projects with fields=["_internalId", "name", "code"] and limit=500
-  - Extract ALL _internalId values into array
-Step 2: Query tasks for EACH project using the ID array
-  - get_project_tasks with projectId: "ALL_IDS_FROM_STEP_1"
-  - System will iterate through each project ID automatically
-  - System will sum up all task counts
+**AVAILABLE TOOLS:**
 
-**Pattern Recognition - Be Smart About User Intent:**
+1. **get_objects** - Discover ALL available objects
+   Returns: List of all queryable objects in Clarity
+   Use when: User mentions unknown object OR at start of discovery
 
-1. **Count queries** (show COUNT only):
-   - "how many [X]"
-   - "count [X]"
-   - "total [X]"
-   - "number of [X]"
+2. **get_object_attributes** - Learn object schema
+   Parameters: objectName (from get_objects)
+   Returns: All fields, types, whether filterable, lookups, etc.
+   Use when: BEFORE querying ANY object (MANDATORY!)
 
-2. **List queries** (show ITEMS):
-   - "show me [X]"
-   - "list [X]"
-   - "display [X]"
-   - "get [X]"
+3. **query_object** - Query any object with discovered fields
+   Parameters:
+   - objectName: From get_objects
+   - fields: From get_object_attributes (use apiName field)
+   - filter: Based on discovered filterable fields
+   - limit: Max 500
 
-3. **Specific project queries**:
-   - "in [PROJECT_CODE]"
-   - "for [PROJECT_CODE]"
-   - "project [PROJECT_CODE]"
+4. **get_project_tasks** - Special endpoint (requires projectId)
+   Use ONLY after querying projects object to get IDs
 
-4. **All projects queries**:
-   - "in total"
-   - "across all projects"
-   - "all tasks"
-   - "total tasks"
+5. **get_project_teams** - Special endpoint (requires projectId)
+   Use ONLY after querying projects object to get IDs
 
-**Smart Examples:**
+**WORKFLOW EXAMPLES:**
 
-Q: "how many tasks in total"
+Q: "how many resources are there"
 A: {"steps": [
-  {"tool": "query_projects", "params": {"fields": ["_internalId", "name"], "limit": 500}, "reason": "Get all project IDs"},
-  {"tool": "get_project_tasks", "params": {"projectId": "ALL_IDS_FROM_STEP_1", "fields": ["name"]}, "reason": "Count tasks in each project and sum"}
+  {"tool": "get_object_attributes", "params": {"objectName": "resources"}, "reason": "Learn resource object schema"},
+  {"tool": "query_object", "params": {"objectName": "resources", "fields": ["_internalId", "fullName"], "limit": 500}, "reason": "Count all resources using discovered fields"}
+], "intent": "count_resources"}
+
+Q: "show me submitted timesheets"
+A: {"steps": [
+  {"tool": "get_object_attributes", "params": {"objectName": "timesheets"}, "reason": "Learn timesheet schema and status field"},
+  {"tool": "query_object", "params": {"objectName": "timesheets", "fields": ["FIELDS_FROM_STEP_1"], "filter": "(status = 'SUBMITTED')", "limit": 50}, "reason": "Query submitted timesheets"}
+], "intent": "list_timesheets"}
+
+Q: "count ideas in review status"
+A: {"steps": [
+  {"tool": "get_object_attributes", "params": {"objectName": "ideas"}, "reason": "Discover idea fields and status values"},
+  {"tool": "query_object", "params": {"objectName": "ideas", "fields": ["_internalId", "name"], "filter": "(status = 'REVIEW')", "limit": 500}, "reason": "Count ideas in review"}
+], "intent": "count_ideas"}
+
+Q: "what fields does resource have"
+A: {"steps": [
+  {"tool": "get_object_attributes", "params": {"objectName": "resources"}, "reason": "Get complete resource schema"}
+], "intent": "describe_object"}
+
+Q: "what objects are available"
+A: {"steps": [
+  {"tool": "get_objects", "params": {}, "reason": "List all available objects"}
+], "intent": "list_objects"}
+
+Q: "how many tasks in total across all projects"
+A: {"steps": [
+  {"tool": "get_object_attributes", "params": {"objectName": "projects"}, "reason": "Learn project schema"},
+  {"tool": "query_object", "params": {"objectName": "projects", "fields": ["_internalId", "name"], "limit": 500}, "reason": "Get all project IDs"},
+  {"tool": "get_project_tasks", "params": {"projectId": "ALL_IDS_FROM_STEP_2", "fields": ["name"]}, "reason": "Count tasks across all projects"}
 ], "intent": "count_total_tasks"}
 
-Q: "how many active projects"
+Q: "show active projects with their managers"
 A: {"steps": [
-  {"tool": "query_projects", "params": {"filter": "(isActive = true)", "fields": ["_internalId", "name"], "limit": 500}, "reason": "Count active projects"}
-], "intent": "count_projects"}
-
-Q: "show active projects"
-A: {"steps": [
-  {"tool": "query_projects", "params": {"filter": "(isActive = true)", "fields": ["name", "code", "status", "manager"], "limit": 50}, "reason": "List active projects"}
+  {"tool": "get_object_attributes", "params": {"objectName": "projects"}, "reason": "Discover project fields including manager and isActive"},
+  {"tool": "query_object", "params": {"objectName": "projects", "fields": ["FIELDS_FROM_STEP_1"], "filter": "(isActive = true)", "limit": 50}, "reason": "Query active projects"}
 ], "intent": "list_projects"}
 
-Q: "how many tasks in this_proj"
+Q: "count unposted transactions"
 A: {"steps": [
-  {"tool": "query_projects", "params": {"filter": "(code = 'this_proj')", "fields": ["_internalId", "name"]}, "reason": "Find project ID"},
-  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1", "fields": ["name"]}, "reason": "Count tasks"}
+  {"tool": "get_object_attributes", "params": {"objectName": "unpostedTransactions"}, "reason": "Learn transaction object schema"},
+  {"tool": "query_object", "params": {"objectName": "unpostedTransactions", "fields": ["_internalId", "transactionDate"], "limit": 500}, "reason": "Count unposted transactions"}
+], "intent": "count_transactions"}
+
+Q: "list high priority risks with owners"
+A: {"steps": [
+  {"tool": "get_object_attributes", "params": {"objectName": "risks"}, "reason": "Discover risk fields including priority and owner"},
+  {"tool": "query_object", "params": {"objectName": "risks", "fields": ["FIELDS_FROM_STEP_1"], "filter": "(priority = 'HIGH')", "limit": 50}, "reason": "Query high priority risks"}
+], "intent": "list_risks"}
+
+Q: "how many tasks in project alpha_proj"
+A: {"steps": [
+  {"tool": "get_object_attributes", "params": {"objectName": "projects"}, "reason": "Learn project schema"},
+  {"tool": "query_object", "params": {"objectName": "projects", "fields": ["_internalId", "name"], "filter": "(code = 'alpha_proj')", "limit": 1}, "reason": "Find project ID"},
+  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_2", "fields": ["name"]}, "reason": "Count tasks in project"}
 ], "intent": "count_project_tasks"}
 
-Q: "list all teams across projects"
-A: {"steps": [
-  {"tool": "query_projects", "params": {"fields": ["_internalId", "name"], "limit": 500}, "reason": "Get all project IDs"},
-  {"tool": "get_project_teams", "params": {"projectId": "ALL_IDS_FROM_STEP_1", "fields": ["resourceId", "role"]}, "reason": "Get teams from all projects"}
-], "intent": "list_all_teams"}
+**SPECIAL PLACEHOLDER: FIELDS_FROM_STEP_X**
+When you discover fields via get_object_attributes in step N, use "FIELDS_FROM_STEP_N" in subsequent steps.
+System will automatically extract relevant apiName fields from the schema result.
 
-Q: "show me completed tasks in alpha_proj"
-A: {"steps": [
-  {"tool": "query_projects", "params": {"filter": "(code = 'alpha_proj')", "fields": ["_internalId", "name"]}, "reason": "Find project ID"},
-  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1", "fields": ["name", "status", "percentComplete"]}, "reason": "Get tasks to filter completed ones"}
-], "intent": "list_completed_tasks"}
+**INTENT PATTERNS:**
+- "count_[object]" - Counting items
+- "list_[object]" - Listing items
+- "list_objects" - Show available objects
+- "describe_object" - Show object schema
 
-Q: "hi" or "hello" or "help"
-A: {"steps": [], "message": "👋 Hello! I can help you with Clarity PPM. I'm smart enough to:\n• Count tasks across ALL projects\n• Count/list projects, tasks, teams\n• Query specific projects by code\n• And much more! Just ask naturally.", "intent": "greeting"}
-
-**Response Format:**
-Always include "intent" field to help with response formatting:
-- "count_total_tasks" - Sum tasks across all projects
-- "count_projects" - Count projects
-- "count_project_tasks" - Count tasks in specific project
-- "list_projects" - List projects
-- "list_tasks" - List tasks
-- "list_teams" - List team members
-- "greeting" - Greeting message
+**KEY PRINCIPLES:**
+1. ALWAYS learn schema BEFORE querying
+2. Use discovered field names (apiName from schema)
+3. Extract IDs for parent-child relationships
+4. Iterate when aggregating across multiple records
+5. Be smart about field selection (minimal for counts, detailed for lists)
 
 Respond ONLY with valid JSON.`;
 
@@ -1022,14 +1042,20 @@ app.post('/api/chat', async (req, res) => {
     if (plan.action === 'help') {
       return res.json({
         success: true,
-        reply: `🤖 **I can help you with Clarity PPM!**\n\n` +
-               `📊 **Count things:**\n` +
-               `- "How many projects?"\n` +
-               `- "How many tasks in this_proj?"\n\n` +
-               `📋 **List things:**\n` +
-               `- "Show me active projects"\n` +
-               `- "List tasks in this_proj"\n\n` +
-               `Just ask naturally!`,
+        reply: `🤖 **I'm an Intelligent Clarity PPM Assistant!**\n\n` +
+               `🔍 **I can work with ANY object in Clarity:**\n` +
+               `- "What objects are available?"\n` +
+               `- "What fields does the resource object have?"\n\n` +
+               `📊 **Count anything:**\n` +
+               `- "How many resources?"\n` +
+               `- "Count all timesheets"\n` +
+               `- "How many ideas are in review?"\n` +
+               `- "Total tasks across all projects"\n\n` +
+               `📋 **List anything:**\n` +
+               `- "Show active projects"\n` +
+               `- "List high priority risks"\n` +
+               `- "Display submitted timesheets"\n\n` +
+               `✨ **I discover schemas dynamically - just ask naturally!**`,
         timestamp: new Date().toISOString()
       });
     }
@@ -1068,7 +1094,7 @@ app.post('/api/chat', async (req, res) => {
             const value = params[key];
             
             // Handle FROM_STEP_X pattern - extract single _internalId
-            if (typeof value === 'string' && value.startsWith('FROM_STEP_') && !value.includes('ALL_IDS')) {
+            if (typeof value === 'string' && value.startsWith('FROM_STEP_') && !value.includes('ALL_IDS') && !value.includes('FIELDS')) {
               const stepNum = parseInt(value.split('_')[2]);
               const stepResult = context[`step${stepNum}`];
               
@@ -1083,7 +1109,9 @@ app.post('/api/chat', async (req, res) => {
             
             // Handle ALL_IDS_FROM_STEP_X pattern - extract array of all IDs
             if (typeof value === 'string' && value.includes('ALL_IDS_FROM_STEP_')) {
-              const stepNum = parseInt(value.split('_')[3]);
+              // Extract step number from "ALL_IDS_FROM_STEP_1" -> ["ALL", "IDS", "FROM", "STEP", "1"]
+              const parts = value.split('_');
+              const stepNum = parseInt(parts[parts.length - 1]); // Get last element
               const stepResult = context[`step${stepNum}`];
               
               if (stepResult && stepResult._results && stepResult._results.length > 0) {
@@ -1092,9 +1120,56 @@ app.post('/api/chat', async (req, res) => {
                   .map((r: any) => r._internalId || r.id)
                   .filter(Boolean);
                 params[key] = allIds;
-                console.log(`[AI Agent] Replaced ${value} with ${allIds.length} IDs`);
+                console.log(`[AI Agent] Replaced ${value} with ${allIds.length} IDs from step ${stepNum}`);
               } else {
                 throw new Error(`Could not extract IDs from step ${stepNum}`);
+              }
+            }
+            
+            // Handle FIELDS_FROM_STEP_X pattern - extract field names from schema
+            if (typeof value === 'string' && value.includes('FIELDS_FROM_STEP_')) {
+              const parts = value.split('_');
+              const stepNum = parseInt(parts[parts.length - 1]);
+              const stepResult = context[`step${stepNum}`];
+              
+              if (stepResult && stepResult._results && stepResult._results.length > 0) {
+                // Extract relevant field apiNames from schema
+                // For listing: get first 10 meaningful fields
+                // For counting: just get _internalId and name
+                const schema = stepResult._results;
+                
+                // Determine if this is for counting or listing based on intent
+                const isCountQuery = plan.intent && plan.intent.startsWith('count_');
+                
+                if (isCountQuery) {
+                  // For counts, just get minimal fields
+                  params[key] = ['_internalId', 'name'];
+                } else {
+                  // For lists, get meaningful display fields
+                  const displayFields = schema
+                    .filter((field: any) => {
+                      const apiName = field.apiName || field.name || '';
+                      // Exclude internal/system fields
+                      return !apiName.startsWith('_') || apiName === '_internalId';
+                    })
+                    .slice(0, 10)
+                    .map((field: any) => field.apiName || field.name)
+                    .filter(Boolean);
+                  
+                  // Always include _internalId and name if not present
+                  if (!displayFields.includes('_internalId')) {
+                    displayFields.unshift('_internalId');
+                  }
+                  if (!displayFields.includes('name') && !displayFields.includes('fullName')) {
+                    displayFields.splice(1, 0, 'name');
+                  }
+                  
+                  params[key] = displayFields.slice(0, 10); // Limit to 10 fields
+                }
+                
+                console.log(`[AI Agent] Replaced ${value} with ${params[key].length} fields from schema`);
+              } else {
+                throw new Error(`Could not extract fields from step ${stepNum}`);
               }
             }
           });
@@ -1107,13 +1182,38 @@ app.post('/api/chat', async (req, res) => {
           // Execute the tool
           let result: any;
           
-          if (step.tool === 'query_projects') {
+          if (step.tool === 'get_objects') {
+            // Discover all available objects
+            result = await handleGetObjects();
+            
+          } else if (step.tool === 'get_object_attributes') {
+            // Get schema for specific object
+            if (!params.objectName) {
+              throw new Error('objectName is required for get_object_attributes');
+            }
+            result = await handleGetObjectAttributes(params.objectName);
+            
+          } else if (step.tool === 'query_object') {
+            // Query any object dynamically
+            if (!params.objectName) {
+              throw new Error('objectName is required for query_object');
+            }
+            result = await handleQueryObject({
+              objectName: params.objectName,
+              fields: params.fields || ['_internalId', 'name'],
+              filter: params.filter,
+              limit: Math.min(params.limit || 100, 500)
+            });
+            
+          } else if (step.tool === 'query_projects') {
+            // Legacy support - redirect to query_object
             result = await handleQueryObject({
               objectName: 'projects',
               fields: params.fields || ['_internalId', 'name', 'code'],
               filter: params.filter,
               limit: Math.min(params.limit || 100, 500)
             });
+            
           } else if (step.tool === 'get_project_tasks') {
             if (!params.projectId) {
               throw new Error('projectId is required for get_project_tasks');
@@ -1263,6 +1363,59 @@ app.post('/api/chat', async (req, res) => {
       const projectsProcessed = finalResult._projectsProcessed;
       
       // Smart response based on intent
+      
+      // Handle object discovery
+      if (intent === 'list_objects') {
+        if (finalResult._results && finalResult._results.length > 0) {
+          const objects = finalResult._results.map((obj: any, i: number) => 
+            `${i + 1}. **${obj.name || obj.objectName}**${obj.description ? ` - ${obj.description}` : ''}`
+          ).join('\n');
+          
+          return res.json({
+            success: true,
+            reply: `🗂️ **Available Objects in Clarity PPM** (${count} total):\n\n${objects}`,
+            data: finalResult,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+      
+      // Handle object schema description
+      if (intent === 'describe_object') {
+        if (finalResult._results && finalResult._results.length > 0) {
+          const attrs = finalResult._results.slice(0, 20).map((attr: any, i: number) => 
+            `${i + 1}. **${attr.apiName || attr.name}** (${attr.dataType || 'unknown'})`
+          ).join('\n');
+          
+          const more = count > 20 ? `\n\n_...and ${count - 20} more fields_` : '';
+          
+          return res.json({
+            success: true,
+            reply: `📋 **Object Schema** (${count} fields):\n\n${attrs}${more}`,
+            data: finalResult,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+      
+      // Handle count for ANY object using intent pattern
+      if (intent.startsWith('count_')) {
+        const objectType = intent.replace('count_', '').replace('_', ' ');
+        let reply = `📊 Found **${count} ${objectType}**`;
+        
+        if (isAggregated && projectsProcessed) {
+          reply += `\n✅ Scanned ${projectsProcessed} projects`;
+        }
+        
+        return res.json({
+          success: true,
+          reply: reply,
+          data: { count, totalCount: count, objectType, projectsProcessed },
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Specific handling for known intents
       if (intent === 'count_total_tasks' || (userQuery.includes('how many') && userQuery.includes('total') && userQuery.includes('task'))) {
         let reply = `📊 **Found ${count} tasks in total**`;
         if (isAggregated && projectsProcessed) {
