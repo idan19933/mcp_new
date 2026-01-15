@@ -341,7 +341,7 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
   // Build query/request based on operation
   let path = `/${intent.objectType}`;
   let method = 'GET';
-  let query: Record<string, any> = {};
+  let query: Record<string, string | number> = {};
   let body: any = null;
   
   // Handle UPDATE operation
@@ -434,8 +434,7 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
   }
   
   // Set limit (only for non-create/update operations)
-  const needsLimit = intent.operation !== 'create' && intent.operation !== 'update';
-  if (needsLimit) {
+  if (intent.operation === 'count' || intent.operation === 'list' || intent.operation === 'get') {
     if (intent.limit) {
       query.limit = Math.min(intent.limit, 500);
     } else if (!query.limit) {
