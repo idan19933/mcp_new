@@ -191,13 +191,46 @@ async function handleGetObjectAttributes(objectName: string): Promise<any> {
     return cachedAttributes.get(objectName);
   }
 
-  const endpoint = `/describeAttributes?filter=(resourceName+%3D+%27${objectName}%27)`;
-  const result = await makeRequest(endpoint);
+  // Sanitize object name (remove special chars)
+  const cleanName = objectName.replace(/[^a-zA-Z0-9_]/g, '');
 
-  cachedAttributes.set(objectName, result);
-  console.log(`[Cache] Stored attributes for ${objectName}`);
+  try {
+    const endpoint = `/describeAttributes?filter=(resourceName+%3D+%27${cleanName}%27)`;
+    const result = await makeRequest(endpoint);
+    
+    // Validate we actually got results
+    if (!result._results || result._results.length === 0) {
+      console.warn(`[Clarity API] Warning: No attributes found for ${objectName}. It might not be API-enabled.`);
+      // Return a dummy schema so the agent doesn't crash
+      return {
+        _results: [
+          { apiName: '_internalId', dataType: 'number', name: '_internalId' },
+          { apiName: 'name', dataType: 'string', name: 'name' },
+          { apiName: 'code', dataType: 'string', name: 'code' },
+          { apiName: 'isActive', dataType: 'boolean', name: 'isActive' }
+        ],
+        _totalCount: 4,
+        _fallback: true
+      };
+    }
 
-  return result;
+    cachedAttributes.set(objectName, result);
+    console.log(`[Cache] Stored ${result._results.length} attributes for ${objectName}`);
+
+    return result;
+  } catch (error) {
+    console.error(`[Clarity API] Error describing attributes for ${objectName}:`, error);
+    // Return basic fallback schema
+    return {
+      _results: [
+        { apiName: '_internalId', dataType: 'number', name: '_internalId' },
+        { apiName: 'name', dataType: 'string', name: 'name' }
+      ],
+      _totalCount: 2,
+      _fallback: true,
+      _error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
 }
 
 async function handleQueryObject(args: {
@@ -1093,29 +1126,26 @@ app.post('/api/chat', async (req, res) => {
           Object.keys(params).forEach(key => {
             const value = params[key];
             
-            // Handle FROM_STEP_X pattern - extract single _internalId
+            // 1. Handle ID Replacement (FROM_STEP_X)
             if (typeof value === 'string' && value.startsWith('FROM_STEP_') && !value.includes('ALL_IDS') && !value.includes('FIELDS')) {
               const stepNum = parseInt(value.split('_')[2]);
               const stepResult = context[`step${stepNum}`];
               
               if (stepResult && stepResult._results && stepResult._results[0]) {
-                // Extract _internalId (preferred) or id as fallback
                 params[key] = stepResult._results[0]._internalId || stepResult._results[0].id;
-                console.log(`[AI Agent] Replaced ${value} with: ${params[key]}`);
+                console.log(`[AI Agent] Replaced ${value} with ID: ${params[key]}`);
               } else {
                 throw new Error(`Could not extract ID from step ${stepNum}`);
               }
             }
             
-            // Handle ALL_IDS_FROM_STEP_X pattern - extract array of all IDs
+            // 2. Handle ID Array Replacement (ALL_IDS_FROM_STEP_X)
             if (typeof value === 'string' && value.includes('ALL_IDS_FROM_STEP_')) {
-              // Extract step number from "ALL_IDS_FROM_STEP_1" -> ["ALL", "IDS", "FROM", "STEP", "1"]
               const parts = value.split('_');
-              const stepNum = parseInt(parts[parts.length - 1]); // Get last element
+              const stepNum = parseInt(parts[parts.length - 1]);
               const stepResult = context[`step${stepNum}`];
               
               if (stepResult && stepResult._results && stepResult._results.length > 0) {
-                // Extract all _internalId values
                 const allIds = stepResult._results
                   .map((r: any) => r._internalId || r.id)
                   .filter(Boolean);
@@ -1126,50 +1156,60 @@ app.post('/api/chat', async (req, res) => {
               }
             }
             
-            // Handle FIELDS_FROM_STEP_X pattern - extract field names from schema
-            if (typeof value === 'string' && value.includes('FIELDS_FROM_STEP_')) {
-              const parts = value.split('_');
+            // 3. Handle Dynamic Fields (FIELDS_FROM_STEP_X) - CRITICAL FIX
+            // Check if it's a string OR an Array containing the placeholder
+            const isPlaceholderArray = Array.isArray(value) && value.length > 0 && 
+                                      typeof value[0] === 'string' && value[0].includes('FIELDS_FROM_STEP_');
+            const isPlaceholderString = typeof value === 'string' && value.includes('FIELDS_FROM_STEP_');
+
+            if (isPlaceholderArray || isPlaceholderString) {
+              // Extract step number
+              const valString = isPlaceholderArray ? value[0] : value;
+              const parts = valString.split('_');
               const stepNum = parseInt(parts[parts.length - 1]);
               const stepResult = context[`step${stepNum}`];
               
-              if (stepResult && stepResult._results && stepResult._results.length > 0) {
-                // Extract relevant field apiNames from schema
-                // For listing: get first 10 meaningful fields
-                // For counting: just get _internalId and name
+              if (stepResult && stepResult._results) {
                 const schema = stepResult._results;
                 
-                // Determine if this is for counting or listing based on intent
+                // Smart Field Selection Logic
                 const isCountQuery = plan.intent && plan.intent.startsWith('count_');
                 
                 if (isCountQuery) {
-                  // For counts, just get minimal fields
-                  params[key] = ['_internalId', 'name'];
+                  // For counting, we only need internal ID
+                  params[key] = ['_internalId'];
+                  console.log(`[AI Agent] Count query - using minimal fields: _internalId`);
                 } else {
-                  // For lists, get meaningful display fields
+                  // For listing, pick "Display Friendly" fields
+                  // Filter out complex types or internal fields that cause API errors
                   const displayFields = schema
                     .filter((field: any) => {
                       const apiName = field.apiName || field.name || '';
-                      // Exclude internal/system fields
-                      return !apiName.startsWith('_') || apiName === '_internalId';
+                      // Only allow standard types, avoid 'attachment' or complex types
+                      return apiName !== 'attachment' && (!apiName.startsWith('_') || apiName === '_internalId');
                     })
-                    .slice(0, 10)
+                    .slice(0, 10) // Limit to 10 columns to prevent URL overflow
                     .map((field: any) => field.apiName || field.name)
                     .filter(Boolean);
                   
-                  // Always include _internalId and name if not present
+                  // Ensure mandatory fields exist
                   if (!displayFields.includes('_internalId')) {
                     displayFields.unshift('_internalId');
                   }
                   if (!displayFields.includes('name') && !displayFields.includes('fullName')) {
-                    displayFields.splice(1, 0, 'name');
+                    // Check if 'name' exists in schema before adding
+                    if (schema.some((f: any) => (f.apiName === 'name' || f.name === 'name'))) {
+                      displayFields.splice(1, 0, 'name');
+                    }
                   }
-                  
-                  params[key] = displayFields.slice(0, 10); // Limit to 10 fields
+
+                  params[key] = displayFields;
+                  console.log(`[AI Agent] List query - smart field selection: ${displayFields.join(', ')}`);
                 }
-                
-                console.log(`[AI Agent] Replaced ${value} with ${params[key].length} fields from schema`);
               } else {
-                throw new Error(`Could not extract fields from step ${stepNum}`);
+                // Fallback if schema discovery failed
+                console.warn(`[AI Agent] Schema discovery failed, using defaults.`);
+                params[key] = ['_internalId', 'name', 'code', 'uniqueName'];
               }
             }
           });
