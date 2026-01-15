@@ -732,27 +732,42 @@ async function analyzeIntentWithClaude(message: string, conversationHistory: any
   }
 
   try {
-    const systemPrompt = `You are a Clarity PPM assistant. Analyze user queries and determine what Clarity API calls to make.
+    const systemPrompt = `You are a Clarity PPM assistant that creates execution plans using Clarity REST API.
 
-Available tools:
-1. query_projects - Get projects list
-2. get_project_by_code - Find project by code (like "this_proj", "TEST01")
-3. get_project_tasks - Get tasks for a specific project (needs project ID)
-4. get_project_teams - Get team members for a project
-5. count_items - Count projects/tasks/resources
+Available Clarity API calls:
+1. query_projects - Query projects
+   Fields: id, name, code, manager, status, percentComplete, isActive, scheduleStart, scheduleFinish
+   Filter: Use "isActive" (not "active") for active projects: (isActive = true)
 
-When user asks about tasks in a project:
-- Step 1: Find the project by code using query_projects with filter
-- Step 2: Use the project ID to get tasks
+2. get_project_tasks - Get tasks for a project (requires projectId from step 1)
+   Fields: name, status, percentComplete, start, finish
 
-Respond with JSON:
-{
-  "steps": [
-    {"tool": "query_projects", "params": {"filter": "(code = 'PROJECT_CODE')"}, "reason": "Find project ID"},
-    {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1"}, "reason": "Get tasks"}
-  ],
-  "response_format": "List of tasks with completion %"
-}`;
+3. get_project_teams - Get team members (requires projectId)
+   Fields: resourceId, role, allocationPercentage
+
+When user asks about tasks/teams in a project:
+- Step 1: query_projects with filter (code = 'PROJECT_CODE') to get project ID
+- Step 2: Use projectId from step 1 in get_project_tasks or get_project_teams
+
+IMPORTANT: 
+- Use "isActive" not "active" in filters
+- Project code filter: (code = 'value')
+- For greetings/help, return empty steps array
+
+Examples:
+Q: "show active projects"
+A: {"steps": [{"tool": "query_projects", "params": {"filter": "(isActive = true)", "fields": ["name", "code", "status"], "limit": 50}}]}
+
+Q: "how many tasks in this_proj"
+A: {"steps": [
+  {"tool": "query_projects", "params": {"filter": "(code = 'this_proj')", "fields": ["id"]}, "reason": "Find project"},
+  {"tool": "get_project_tasks", "params": {"projectId": "FROM_STEP_1", "fields": ["name"]}, "reason": "Get tasks"}
+]}
+
+Q: "hi"
+A: {"steps": [], "message": "Hello! How can I help you with Clarity PPM?"}
+
+Respond ONLY with valid JSON.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -956,6 +971,15 @@ app.post('/api/chat', async (req, res) => {
     
     // Execute multi-step plan
     if (plan.steps && Array.isArray(plan.steps)) {
+      // Handle empty steps (greetings, etc)
+      if (plan.steps.length === 0) {
+        return res.json({
+          success: true,
+          reply: plan.message || "👋 Hello! How can I help you with Clarity PPM?",
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       let context: any = {};
       let finalResult: any = null;
       
@@ -994,13 +1018,15 @@ app.post('/api/chat', async (req, res) => {
               projectId: projectId,
               fields: params.fields || ['resourceId', 'role']
             });
+          } else {
+            throw new Error(`Unknown tool: ${step.tool}`);
           }
           
           // Store result in context
           context[`step${plan.steps.indexOf(step) + 1}`] = result;
           
           // Extract useful values
-          if (result._results && result._results[0]) {
+          if (result && result._results && result._results[0]) {
             if (result._results[0]._internalId) {
               context.projectId = result._results[0]._internalId;
             }
@@ -1022,12 +1048,23 @@ app.post('/api/chat', async (req, res) => {
       }
       
       // Format final result
+      if (!finalResult) {
+        return res.json({
+          success: true,
+          reply: "✅ Request completed successfully.",
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       const count = finalResult._totalCount || finalResult._results?.length || 0;
       let reply = `Found ${count} results.`;
       
-      if (finalResult._results) {
+      if (finalResult._results && finalResult._results.length > 0) {
         const items = finalResult._results.slice(0, 15).map((item: any, i: number) => {
-          return `${i + 1}. ${item.name || item.code || 'Unnamed'}`;
+          const name = item.name || item.code || 'Unnamed';
+          const code = item.code ? `[${item.code}]` : '';
+          const progress = item.percentComplete !== undefined ? ` - ${item.percentComplete}%` : '';
+          return `${i + 1}. **${name}** ${code}${progress}`;
         }).join('\n');
         
         const more = count > 15 ? `\n\n_...and ${count - 15} more_` : '';
