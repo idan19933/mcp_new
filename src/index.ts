@@ -380,6 +380,13 @@ Respond with a JSON execution plan only. No explanations.`;
     }
     
     const data = await response.json();
+    
+    // Safely access content
+    if (!data.content || !Array.isArray(data.content) || data.content.length === 0) {
+      console.error('[AI] Invalid response structure:', data);
+      return simplePatternMatch(message);
+    }
+    
     const content = data.content[0].text;
     console.log('[AI] Raw response:', content.substring(0, 200));
     
@@ -397,6 +404,7 @@ Respond with a JSON execution plan only. No explanations.`;
     console.error('[AI] Error:', error);
     return simplePatternMatch(message);
   }
+}
 }
 
 // ============================================================================
