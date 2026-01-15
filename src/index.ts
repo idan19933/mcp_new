@@ -112,6 +112,7 @@ interface AttributeMetadata {
   lookupType?: string;
   maxLength?: number;
   isCustom: boolean;
+  actionType?: string;  // Added to track filter-only fields
 }
 
 const metadataCache = new Map<string, ObjectMetadata>();
@@ -250,7 +251,8 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
       isLookup: attr.dataType === 'lookup',
       lookupType: attr.lookupType,
       maxLength: attr.maxLength,
-      isCustom: attr.isCustom === true
+      isCustom: attr.isCustom === true,
+      actionType: attr.actionType  // Capture if field is filterOnly/dataOnly
     }));
     
     // Build metadata object
@@ -279,7 +281,7 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
 
 /**
  * Gets smart field selection based on metadata
- * Filters out CLOB, attachment, and other problematic field types
+ * Filters out CLOB, attachment, and filter-only field types
  */
 function getSmartFieldSelection(metadata: ObjectMetadata, maxFields: number = 15): string[] {
   const priorityFields = ['_internalId', 'name', 'code', 'uniqueName', 'status'];
@@ -289,6 +291,9 @@ function getSmartFieldSelection(metadata: ObjectMetadata, maxFields: number = 15
       // Exclude problematic types
       if (attr.dataType === 'clob' || attr.dataType === 'attachment') return false;
       if (attr.apiName === 'attachment') return false;
+      
+      // Exclude filter-only fields (actionType = 'filterOnly' or 'dataOnly')
+      if (attr.actionType === 'filterOnly' || attr.actionType === 'dataOnly') return false;
       
       // Include priority fields
       if (priorityFields.includes(attr.apiName)) return true;
@@ -323,6 +328,8 @@ interface QueryIntent {
   parentId?: string;
   childType?: string;
   limit?: number;
+  recordId?: number | string;  // For update/delete operations
+  data?: Record<string, any>;  // For create/update operations
 }
 
 async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[]): Promise<any> {
@@ -331,11 +338,46 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
   // Get metadata
   const metadata = await getObjectMetadata(intent.objectType);
   
-  // Build query based on operation
+  // Build query/request based on operation
   let path = `/${intent.objectType}`;
+  let method = 'GET';
   let query: Record<string, any> = {};
+  let body: any = null;
   
-  // Handle parent-child relationships
+  // Handle UPDATE operation
+  if (intent.operation === 'update' && intent.recordId) {
+    path = `/${intent.objectType}/${intent.recordId}`;
+    method = 'PATCH';
+    body = intent.data || {};
+    return { path, query: {}, metadata, method, body };
+  }
+  
+  // Handle CREATE operation
+  if (intent.operation === 'create') {
+    method = 'POST';
+    body = intent.data || {};
+    
+    // Handle parent-child create (e.g., create task in project)
+    if (intent.parentId && intent.childType) {
+      let actualParentId = intent.parentId;
+      if (typeof actualParentId === 'string' && actualParentId.includes('STEP_')) {
+        const stepMatch = actualParentId.match(/STEP_(\d+)_ID/);
+        if (stepMatch && previousResults) {
+          const stepIndex = parseInt(stepMatch[1]) - 1;
+          const previousResult = previousResults[stepIndex];
+          if (previousResult?.result?._results?.[0]?._internalId) {
+            actualParentId = previousResult.result._results[0]._internalId;
+            console.log(`[QueryBuilder] Resolved ${intent.parentId} to ${actualParentId}`);
+          }
+        }
+      }
+      path = `/${intent.objectType}/${actualParentId}/${intent.childType}`;
+    }
+    
+    return { path, query: {}, metadata, method, body };
+  }
+  
+  // Handle parent-child relationships for GET/LIST/COUNT
   if (intent.parentId && intent.childType) {
     // Check if parentId is a reference to previous step
     let actualParentId = intent.parentId;
@@ -359,13 +401,13 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     metadata.attributes = childMetadata.attributes;
   }
   
-  // Set fields
+  // Set fields for GET/LIST operations
   if (intent.operation === 'count') {
     query.fields = '_internalId';
     query.limit = 500;
   } else if (intent.fields && intent.fields.length > 0) {
     query.fields = intent.fields.join(',');
-  } else {
+  } else if (intent.operation === 'list' || intent.operation === 'get') {
     const smartFields = getSmartFieldSelection(metadata);
     query.fields = smartFields.join(',');
   }
@@ -394,11 +436,11 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
   // Set limit
   if (intent.limit) {
     query.limit = Math.min(intent.limit, 500);
-  } else if (!query.limit) {
+  } else if (!query.limit && intent.operation !== 'create' && intent.operation !== 'update') {
     query.limit = intent.operation === 'count' ? 500 : 50;
   }
   
-  return { path, query, metadata };
+  return { path, query, metadata, method, body };
 }
 
 // ============================================================================
@@ -588,11 +630,66 @@ A: {
   "intent": "tasks_by_status"
 }
 
+Q: "Create a project named NewProject with code NEWPROJ"
+A: {
+  "steps": [
+    {
+      "operation": "create",
+      "objectType": "projects",
+      "data": {
+        "name": "NewProject",
+        "code": "NEWPROJ"
+      }
+    }
+  ],
+  "intent": "create_project"
+}
+
+Q: "Create a task called Setup in project Alpha"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "name": "Alpha" },
+      "fields": ["_internalId", "name"]
+    },
+    {
+      "operation": "create",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
+      "data": {
+        "name": "Setup",
+        "taskType": "task"
+      }
+    }
+  ],
+  "intent": "create_task_in_project"
+}
+
+Q: "Update project 5003001 to set status as Active"
+A: {
+  "steps": [
+    {
+      "operation": "update",
+      "objectType": "projects",
+      "recordId": 5003001,
+      "data": {
+        "status": "A"
+      }
+    }
+  ],
+  "intent": "update_project_status"
+}
+
 **IMPORTANT RULES:**
 1. For "how many X in project Y" - Use TWO steps: find project, then count its children
 2. For distributions/grouping - List all items with status field, client will group
 3. Use parentId: "STEP_1_ID" to reference previous step results
 4. Always include _internalId in project lookup steps
+5. For CREATE operations - Use "data" field with required attributes
+6. For UPDATE operations - Use "recordId" and "data" with fields to update
 
 User Query: "${message}"
 
@@ -694,24 +791,27 @@ async function executePlan(plan: any): Promise<any> {
     
     try {
       // Build intelligent query with access to previous results
-      const { path, query, metadata } = await buildIntelligentQuery(step, results);
+      const { path, query, metadata, method, body } = await buildIntelligentQuery(step, results);
       
-      // Execute query
-      const queryString = new URLSearchParams(
-        Object.entries(query).map(([k, v]) => [k, String(v)] as [string, string])
-      ).toString();
+      // Build URL with query parameters
+      const queryString = Object.keys(query).length > 0
+        ? '?' + new URLSearchParams(
+            Object.entries(query).map(([k, v]) => [k, String(v)] as [string, string])
+          ).toString()
+        : '';
       
-      const result = await makeRequest(`${path}?${queryString}`);
+      // Execute request
+      const result = await makeRequest(`${path}${queryString}`, method || 'GET', body);
       
       results.push({
         step: i + 1,
         operation: step.operation,
         objectType: step.objectType,
         result,
-        recordCount: result._totalCount || result._results?.length || 0
+        recordCount: result._totalCount || result._results?.length || (result._internalId ? 1 : 0)
       });
       
-      console.log(`[Step ${i + 1}] Success: ${result._totalCount || result._results?.length || 0} records`);
+      console.log(`[Step ${i + 1}] Success: ${result._totalCount || result._results?.length || 'created/updated'}`);
       
     } catch (error) {
       console.error(`[Step ${i + 1}] Failed:`, error);
@@ -748,6 +848,18 @@ function formatResponse(execution: any): string {
   const operation = finalResult.operation;
   const objectType = finalResult.objectType;
   const intent = execution.plan?.intent || '';
+  
+  // Handle CREATE operations
+  if (operation === 'create') {
+    const newId = finalResult.result._internalId;
+    return `✅ **Created ${objectType}** (ID: ${newId})`;
+  }
+  
+  // Handle UPDATE operations
+  if (operation === 'update') {
+    const updatedId = finalResult.result._internalId;
+    return `✅ **Updated ${objectType}** (ID: ${updatedId})`;
+  }
   
   // Handle count operations
   if (operation === 'count') {
