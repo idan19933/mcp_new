@@ -130,14 +130,109 @@ async function getObjectSchema(objectName: string): Promise<any> {
 }
 
 // ============================================================================
+// SIMPLE PATTERN MATCHER (Fallback)
+// ============================================================================
+
+function simplePatternMatch(message: string): any {
+  const lower = message.toLowerCase();
+  
+  // Greetings
+  if (/^(hi|hello|hey)$/i.test(lower.trim())) {
+    return {
+      steps: [],
+      message: "👋 Hello! I can help you query Clarity PPM. Try asking 'how many projects' or 'show active projects'",
+      intent: "greeting"
+    };
+  }
+  
+  // Count projects
+  if (/how many.*project/i.test(lower)) {
+    return {
+      steps: [
+        {
+          tool: "get_schema",
+          params: { objectName: "projects" },
+          reason: "Learn project schema"
+        },
+        {
+          tool: "call_endpoint",
+          params: {
+            path: "/projects",
+            query: { fields: "_internalId", limit: 500 }
+          },
+          reason: "Count all projects"
+        }
+      ],
+      intent: "count_projects"
+    };
+  }
+  
+  // List active projects
+  if (/(show|list).*active.*project/i.test(lower)) {
+    return {
+      steps: [
+        {
+          tool: "get_schema",
+          params: { objectName: "projects" },
+          reason: "Learn project schema"
+        },
+        {
+          tool: "call_endpoint",
+          params: {
+            path: "/projects",
+            query: {
+              filter: "(isActive=true)",
+              fields: "FIELDS_FROM_STEP_1",
+              limit: 50
+            }
+          },
+          reason: "List active projects"
+        }
+      ],
+      intent: "list_projects"
+    };
+  }
+  
+  // Count resources
+  if (/how many.*resource/i.test(lower)) {
+    return {
+      steps: [
+        {
+          tool: "get_schema",
+          params: { objectName: "resources" },
+          reason: "Learn resource schema"
+        },
+        {
+          tool: "call_endpoint",
+          params: {
+            path: "/resources",
+            query: { fields: "_internalId", limit: 500 }
+          },
+          reason: "Count all resources"
+        }
+      ],
+      intent: "count_resources"
+    };
+  }
+  
+  return {
+    steps: [],
+    message: "I'm not sure how to help with that. Try 'how many projects' or 'show active projects'",
+    intent: "unknown"
+  };
+}
+
+// ============================================================================
 // AI AGENT: DYNAMIC SWAGGER LOGIC
 // ============================================================================
 
 async function analyzeIntentWithClaude(message: string, history: any[]): Promise<any> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  
+  // Simple fallback patterns if no AI key
   if (!ANTHROPIC_API_KEY) {
-    console.log('[AI] No Anthropic API key, falling back to simple patterns');
-    return { action: 'error', message: "No API Key configured" };
+    console.log('[AI] No API key, using simple patterns');
+    return simplePatternMatch(message);
   }
 
   // Comprehensive Swagger-aware system prompt
@@ -279,21 +374,28 @@ Respond with a JSON execution plan only. No explanations.`;
       })
     });
     
+    if (!response.ok) {
+      console.error('[AI] API Error:', response.status);
+      return simplePatternMatch(message);
+    }
+    
     const data = await response.json();
     const content = data.content[0].text;
-    console.log('[AI] Raw response:', content);
+    console.log('[AI] Raw response:', content.substring(0, 200));
     
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const plan = JSON.parse(jsonMatch[0]);
-      console.log('[AI] Parsed plan:', JSON.stringify(plan, null, 2));
+      console.log('[AI] Parsed plan with', plan.steps?.length || 0, 'steps');
       return plan;
     }
     
-    return { action: 'unknown', message: 'Could not parse AI response' };
+    console.warn('[AI] Could not parse JSON, using fallback');
+    return simplePatternMatch(message);
+    
   } catch (error) {
     console.error('[AI] Error:', error);
-    return { action: 'error', error: String(error) };
+    return simplePatternMatch(message);
   }
 }
 
@@ -496,13 +598,27 @@ app.post('/api/chat', async (req, res) => {
   try {
     const plan = await analyzeIntentWithClaude(message, conversationHistory || []);
     
-    if (!plan.steps || plan.steps.length === 0) {
+    console.log('[Chat] Received plan:', JSON.stringify(plan, null, 2));
+    
+    // Check for errors in plan generation
+    if (plan.action === 'error' || plan.error) {
+      return res.json({
+        success: false,
+        reply: `❌ AI Error: ${plan.message || plan.error || 'Unknown error'}`,
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Handle greetings and empty plans
+    if (!plan.steps || !Array.isArray(plan.steps) || plan.steps.length === 0) {
       return res.json({
         success: true,
         reply: plan.message || "👋 Hello! I can query ANY Clarity PPM object dynamically. Just ask naturally!",
         timestamp: new Date().toISOString()
       });
     }
+    
+    console.log(`[Chat] Executing ${plan.steps.length} steps...`);
     
     const { finalResult, context, plan: executedPlan } = await executeplan(plan);
     const reply = formatResponse(finalResult, executedPlan);
@@ -511,13 +627,19 @@ app.post('/api/chat', async (req, res) => {
       success: true,
       reply,
       data: finalResult,
-      _debug: { plan: executedPlan, context },
+      _debug: { plan: executedPlan, stepsExecuted: plan.steps.length },
       timestamp: new Date().toISOString()
     });
     
   } catch (error) {
     console.error('[Chat] Error:', error);
     res.json({
+      success: false,
+      reply: `❌ Error: ${error instanceof Error ? error.message : String(error)}`,
+      _debug: { error: String(error) },
+      timestamp: new Date().toISOString()
+    });
+  }
       success: false,
       reply: `❌ Error: ${error instanceof Error ? error.message : String(error)}`,
       timestamp: new Date().toISOString()
