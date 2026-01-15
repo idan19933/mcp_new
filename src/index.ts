@@ -459,6 +459,30 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
           resolvedBody[key] = value;
         }
       }
+      
+      // Apply business logic based on status changes
+      if (resolvedBody.status && intent.childType === 'tasks') {
+        const statusValue = String(resolvedBody.status).toLowerCase();
+        
+        // If setting to completed/complete/closed, also set percentComplete to 100
+        if (statusValue.includes('complet') || statusValue.includes('close') || 
+            statusValue === 'c' || statusValue === 'co') {
+          if (!resolvedBody.percentComplete) {
+            resolvedBody.percentComplete = 100;
+            console.log('[BusinessLogic] Auto-set percentComplete=100 for completed status');
+          }
+        }
+        
+        // If setting to planning/not started, set percentComplete to 0
+        if (statusValue.includes('plan') || statusValue.includes('not') || 
+            statusValue === 'p' || statusValue === 'ns') {
+          if (!resolvedBody.percentComplete) {
+            resolvedBody.percentComplete = 0;
+            console.log('[BusinessLogic] Auto-set percentComplete=0 for planning status');
+          }
+        }
+      }
+      
       body = resolvedBody;
     }
     
@@ -502,6 +526,21 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
           resolvedBody[key] = value;
         }
       }
+      
+      // Apply business logic based on status
+      if (resolvedBody.status && intent.childType === 'tasks') {
+        const statusValue = String(resolvedBody.status).toLowerCase();
+        
+        // If creating as completed, set percentComplete to 100
+        if (statusValue.includes('complet') || statusValue.includes('close') || 
+            statusValue === 'c' || statusValue === 'co') {
+          if (!resolvedBody.percentComplete) {
+            resolvedBody.percentComplete = 100;
+            console.log('[BusinessLogic] Auto-set percentComplete=100 for completed status');
+          }
+        }
+      }
+      
       body = resolvedBody;
     }
     
