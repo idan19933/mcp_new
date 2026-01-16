@@ -576,7 +576,27 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     query.fields = '_internalId';
     query.limit = 500;
   } else if (intent.fields && intent.fields.length > 0) {
-    query.fields = intent.fields.join(',');
+    // Validate requested fields against metadata
+    const validFields = intent.fields.filter(field => {
+      const attr = metadata.attributes.find(a => a.apiName === field);
+      if (!attr && field !== '_internalId') {
+        console.warn(`[FieldValidation] Field '${field}' not found in metadata, excluding`);
+        return false;
+      }
+      return true;
+    });
+    
+    if (validFields.length === 0) {
+      // If no valid fields, use smart selection
+      const smartFields = getSmartFieldSelection(metadata);
+      query.fields = smartFields.join(',');
+      console.log(`[FieldValidation] No valid fields requested, using smart selection`);
+    } else {
+      query.fields = validFields.join(',');
+      if (validFields.length < intent.fields.length) {
+        console.log(`[FieldValidation] Filtered fields: ${validFields.join(',')} (removed invalid fields)`);
+      }
+    }
   } else if (intent.operation === 'list' || intent.operation === 'get') {
     const smartFields = getSmartFieldSelection(metadata);
     query.fields = smartFields.join(',');
@@ -779,6 +799,26 @@ A: {
   "intent": "task_status_distribution"
 }
 
+Q: "List tasks in project Alpha"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "name": "Alpha" },
+      "fields": ["_internalId", "name"]
+    },
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
+      "fields": ["name", "status", "percentComplete", "taskOwner", "_internalId"]
+    }
+  ],
+  "intent": "list_project_tasks"
+}
+
 Q: "How many tasks in each status for project X"
 A: {
   "steps": [
@@ -918,6 +958,7 @@ A: {
 8. For UPDATING TASKS - Include parentId and childType to maintain project context
 9. For creating TASKS - Only "name" is required. Optional: durationDays, percentComplete, startDate, finishDate
 10. For creating PROJECTS - "name" and "code" are required. Optional: status, manager, scheduleStart, scheduleFinish
+11. Use correct field names: taskOwner (not assignedTo), assignedResources, status, percentComplete, startDate, finishDate
 
 User Query: "${message}"
 
@@ -1089,8 +1130,12 @@ function formatResponse(execution: any): string {
   
   // Handle UPDATE operations
   if (operation === 'update') {
-    const updatedId = finalResult.result._internalId;
-    return `✅ **Updated ${actualType}** (ID: ${updatedId})`;
+    const updatedId = finalResult.result._internalId || finalResult.result.id;
+    if (updatedId) {
+      return `✅ **Updated ${actualType}** (ID: ${updatedId})`;
+    } else {
+      return `✅ **Updated ${actualType}**`;
+    }
   }
   
   // Handle count operations
