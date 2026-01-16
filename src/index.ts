@@ -966,6 +966,21 @@ A: {
   "intent": "create_project"
 }
 
+Q: "Create an instance named test in custPs custom object"
+A: {
+  "steps": [
+    {
+      "operation": "create",
+      "objectType": "custPs",
+      "data": {
+        "name": "test",
+        "code": "test_" + Date.now()
+      }
+    }
+  ],
+  "intent": "create_custom_object_instance"
+}
+
 Q: "Create a task called Setup in project Alpha"
 A: {
   "steps": [
@@ -1277,7 +1292,18 @@ async function formatResponse(execution: any): Promise<string> {
   
   const finalResult = execution.results[execution.results.length - 1];
   
-  if (!finalResult || !finalResult.result) {
+  if (!finalResult) {
+    console.error('[FormatResponse] No finalResult in execution.results');
+    return '❌ No results';
+  }
+  
+  // Log for debugging CREATE issues
+  if (finalResult.operation === 'create') {
+    console.log('[FormatResponse] CREATE operation result:', JSON.stringify(finalResult, null, 2));
+  }
+  
+  if (!finalResult.result) {
+    console.error('[FormatResponse] No result in finalResult:', JSON.stringify(finalResult, null, 2));
     return '❌ No results';
   }
   
