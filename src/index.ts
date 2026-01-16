@@ -1217,6 +1217,37 @@ function formatResponse(execution: any): string {
     return reply;
   }
   
+  // Handle "count all custom objects" - multiple COUNT steps
+  if (intent.includes('count') && intent.includes('custom') && execution.results.length > 3) {
+    let reply = `📊 **Custom Objects in System**\n\n`;
+    
+    const countSteps = execution.results.filter((r: any) => 
+      r.operation === 'count' && !r.error
+    );
+    
+    if (countSteps.length === 0) {
+      return '❌ No custom objects found';
+    }
+    
+    // Sort by count descending
+    countSteps.sort((a: any, b: any) => (b.recordCount || 0) - (a.recordCount || 0));
+    
+    let totalRecords = 0;
+    countSteps.forEach((step: any, i: number) => {
+      const stepType = step.objectType;
+      const stepCount = step.recordCount || 0;
+      totalRecords += stepCount;
+      
+      if (stepCount > 0) {
+        reply += `${i + 1}. **${stepType}**: ${stepCount} records\n`;
+      }
+    });
+    
+    const objectsWithData = countSteps.filter((s: any) => s.recordCount > 0).length;
+    reply += `\n_Found ${objectsWithData} custom objects with ${totalRecords} total records_`;
+    return reply;
+  }
+  
   // Handle CREATE operations
   if (operation === 'create') {
     const newId = finalResult.result._internalId;
