@@ -245,41 +245,6 @@ function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, display
 // ============================================================================
 
 /**
- * Discovers all available objects in Clarity
- * Pattern: /describe?filter=((extensions in ('inv')) and (isCustom = true) and (capabilities in ('HIERARCHY_ENABLED')))
- */
-async function discoverAllObjects(): Promise<string[]> {
-  console.log('[Metadata] Discovering all objects...');
-  
-  try {
-    // Get standard objects
-    const standardResult = await makeRequest('/describe?limit=500');
-    
-    // Get custom objects
-    const customResult = await makeRequest('/describe?filter=((isCustom = true))&limit=500');
-    
-    const allObjects = [
-      ...(standardResult._results || []),
-      ...(customResult._results || [])
-    ];
-    
-    const objectNames = allObjects
-      .map((obj: any) => obj.resourceName)
-      .filter(Boolean);
-    
-    console.log(`[Metadata] Discovered ${objectNames.length} objects`);
-    return objectNames;
-    
-  } catch (error) {
-    console.error('[Metadata] Discovery failed:', error);
-    return [
-      'projects', 'tasks', 'resources', 'timesheets', 'ideas', 'risks', 
-      'issues', 'objectives', 'roadmaps', 'users', 'agreements'
-    ]; // Fallback
-  }
-}
-
-/**
  * Detects the appropriate filter pattern based on object type
  */
 function detectObjectFilterPattern(objectName: string): 'full' | 'simple' {
