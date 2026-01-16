@@ -123,6 +123,36 @@ const CACHE_TTL = 1000 * 60 * 15; // 15 minutes
 let discoveredObjects: string[] | null = null;
 let discoveredObjectsTimestamp = 0;
 
+// Cache for object labels (resourceName -> display label)
+const objectLabelsCache = new Map<string, string>();
+
+/**
+ * Gets the display label for an object (e.g., custLoadingTaskszs -> "טעינת משימות")
+ */
+async function getObjectLabel(resourceName: string): Promise<string> {
+  // Check cache first
+  if (objectLabelsCache.has(resourceName)) {
+    return objectLabelsCache.get(resourceName)!;
+  }
+  
+  try {
+    // Fetch from /describe
+    const result = await makeRequest(`/describe?filter=(resourceName = '${resourceName}')&limit=1`, 'GET');
+    
+    if (result._results && result._results.length > 0) {
+      const label = result._results[0].label || resourceName;
+      objectLabelsCache.set(resourceName, label);
+      return label;
+    }
+  } catch (error) {
+    console.warn(`[Labels] Could not fetch label for ${resourceName}`);
+  }
+  
+  // Fallback to resourceName
+  objectLabelsCache.set(resourceName, resourceName);
+  return resourceName;
+}
+
 /**
  * Discovers all available objects (standard + custom) from Clarity PPM
  */
@@ -1175,7 +1205,7 @@ async function executePlan(plan: any): Promise<any> {
 // FORMAT RESPONSE
 // ============================================================================
 
-function formatResponse(execution: any): string {
+async function formatResponse(execution: any): Promise<string> {
   if (!execution.success) {
     return `❌ ${execution.message || 'Execution failed'}`;
   }
@@ -1233,13 +1263,26 @@ function formatResponse(execution: any): string {
     countSteps.sort((a: any, b: any) => (b.recordCount || 0) - (a.recordCount || 0));
     
     let totalRecords = 0;
-    countSteps.forEach((step: any, i: number) => {
+    const displayPromises = countSteps.map(async (step: any) => {
       const stepType = step.objectType;
       const stepCount = step.recordCount || 0;
       totalRecords += stepCount;
       
-      if (stepCount > 0) {
-        reply += `${i + 1}. **${stepType}**: ${stepCount} records\n`;
+      // Get display label
+      const displayLabel = await getObjectLabel(stepType);
+      
+      return {
+        label: displayLabel,
+        resourceName: stepType,
+        count: stepCount
+      };
+    });
+    
+    const displayItems = await Promise.all(displayPromises);
+    
+    displayItems.forEach((item, i) => {
+      if (item.count > 0) {
+        reply += `${i + 1}. **${item.label}** (${item.resourceName}): ${item.count} records\n`;
       }
     });
     
@@ -1250,8 +1293,18 @@ function formatResponse(execution: any): string {
   
   // Handle CREATE operations
   if (operation === 'create') {
-    const newId = finalResult.result._internalId;
-    return `✅ **Created ${actualType}** (ID: ${newId})`;
+    if (!finalResult.result) {
+      return '❌ Create operation failed - no result returned';
+    }
+    
+    const newId = finalResult.result._internalId || finalResult.result.code;
+    const displayLabel = await getObjectLabel(actualType);
+    
+    if (newId) {
+      return `✅ **Created ${displayLabel}** (ID: ${newId})`;
+    } else {
+      return `✅ **Created ${displayLabel}**`;
+    }
   }
   
   // Handle UPDATE operations
@@ -1425,7 +1478,7 @@ app.post('/api/chat', async (req, res) => {
     const execution = await executePlan(plan);
     
     // Format response
-    const reply = formatResponse(execution);
+    const reply = await formatResponse(execution);
     
     res.json({
       success: true,
