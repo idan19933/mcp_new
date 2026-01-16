@@ -1147,11 +1147,13 @@ async function executePlan(plan: any): Promise<any> {
         step: i + 1,
         operation: step.operation,
         objectType: step.objectType,
+        childType: step.childType,  // Preserve childType for response formatting
         result,
         recordCount: result._totalCount || result._results?.length || (result._internalId ? 1 : 0)
       });
       
-      console.log(`[Step ${i + 1}] Success: ${result._totalCount || result._results?.length || 'created/updated'}`);
+      const displayCount = result._totalCount || result._results?.length || (result._internalId ? 1 : 0);
+      console.log(`[Step ${i + 1}] Success: ${displayCount > 0 ? displayCount : 'created/updated'}`);
       
     } catch (error) {
       console.error(`[Step ${i + 1}] Failed:`, error);
@@ -1192,6 +1194,28 @@ function formatResponse(execution: any): string {
   // Get the actual child type if this is a parent-child query
   const finalStep = execution.plan?.steps?.[execution.plan.steps.length - 1];
   const actualType = finalStep?.childType || objectType;
+  
+  // Handle "list all custom objects" - multiple LIST steps
+  if (intent.includes('list') && intent.includes('custom') && execution.results.length > 3) {
+    let reply = `📋 **Custom Objects in System**\n\n`;
+    
+    const listSteps = execution.results.filter((r: any) => 
+      r.operation === 'list' && r.recordCount > 0
+    );
+    
+    if (listSteps.length === 0) {
+      return '❌ No custom objects found';
+    }
+    
+    listSteps.forEach((step: any, i: number) => {
+      const stepType = step.childType || step.objectType;
+      const stepCount = step.recordCount || 0;
+      reply += `${i + 1}. **${stepType}**: ${stepCount} records\n`;
+    });
+    
+    reply += `\n_Total: ${listSteps.length} custom objects with data_`;
+    return reply;
+  }
   
   // Handle CREATE operations
   if (operation === 'create') {
