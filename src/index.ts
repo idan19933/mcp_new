@@ -119,6 +119,72 @@ interface AttributeMetadata {
 const metadataCache = new Map<string, ObjectMetadata>();
 const CACHE_TTL = 1000 * 60 * 15; // 15 minutes
 
+// Cache for discovered objects
+let discoveredObjects: string[] | null = null;
+let discoveredObjectsTimestamp = 0;
+
+/**
+ * Discovers all available objects (standard + custom) from Clarity PPM
+ */
+async function discoverAllObjects(): Promise<string[]> {
+  const now = Date.now();
+  
+  // Return cached if still valid
+  if (discoveredObjects && (now - discoveredObjectsTimestamp) < CACHE_TTL) {
+    return discoveredObjects;
+  }
+  
+  try {
+    console.log('[Discovery] Fetching all objects from /describe...');
+    
+    // Get all objects (standard + custom)
+    const allObjectsUrl = '/describe?limit=500';
+    const allObjects = await makeRequest(allObjectsUrl, 'GET');
+    
+    // Get custom objects specifically
+    const customObjectsUrl = '/describe?filter=(isCustom = true) and (isSystem = false)&limit=500';
+    const customObjects = await makeRequest(customObjectsUrl, 'GET');
+    
+    const objectNames = new Set<string>();
+    
+    // Add all standard objects
+    if (allObjects._results) {
+      allObjects._results.forEach((obj: any) => {
+        if (obj.resourceName) {
+          objectNames.add(obj.resourceName);
+        }
+      });
+    }
+    
+    // Ensure custom objects are included
+    if (customObjects._results) {
+      customObjects._results.forEach((obj: any) => {
+        if (obj.resourceName) {
+          objectNames.add(obj.resourceName);
+        }
+      });
+    }
+    
+    discoveredObjects = Array.from(objectNames);
+    discoveredObjectsTimestamp = now;
+    
+    console.log(`[Discovery] Found ${discoveredObjects.length} objects (including ${customObjects._totalCount || 0} custom)`);
+    
+    return discoveredObjects;
+  } catch (error) {
+    console.error('[Discovery] Failed to discover objects:', error);
+    
+    // Fallback to known standard objects
+    discoveredObjects = [
+      'projects', 'tasks', 'resources', 'teams', 'ideas', 'risks', 'issues',
+      'timesheets', 'timeEntries', 'allocations', 'assignments', 'investments',
+      'portfolios', 'programs', 'milestones', 'dependencies', 'workProducts'
+    ];
+    
+    return discoveredObjects;
+  }
+}
+
 /**
  * Resolves a human-readable lookup value to its API code
  * E.g., "Completed" -> "C", "Active" -> "A"
@@ -964,6 +1030,22 @@ User Query: "${message}"
 
 Respond ONLY with the JSON execution plan. No explanations.`;
 
+  // Discover available objects to inform AI
+  let availableObjectsHint = '';
+  try {
+    const objects = await discoverAllObjects();
+    const customObjects = objects.filter(o => 
+      !['projects', 'tasks', 'resources', 'teams', 'ideas', 'risks', 'issues'].includes(o)
+    );
+    
+    if (customObjects.length > 0) {
+      availableObjectsHint = `\n\nAVAILABLE CUSTOM OBJECTS: ${customObjects.slice(0, 20).join(', ')}`;
+      systemPrompt += availableObjectsHint;
+    }
+  } catch (error) {
+    console.warn('[AI] Could not fetch available objects for context');
+  }
+
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -1205,12 +1287,43 @@ app.get('/health', (req, res) => {
 
 app.get('/api/discover', async (req, res) => {
   try {
-    const objects = await discoverAllObjects();
-    res.json({
-      success: true,
-      objects,
-      count: objects.length
-    });
+    const detailed = req.query.detailed === 'true';
+    
+    if (detailed) {
+      // Get detailed information about all objects
+      console.log('[API] Fetching detailed object list...');
+      
+      const customObjectsUrl = '/describe?filter=(isCustom = true) and (isSystem = false)&limit=500';
+      const customObjects = await makeRequest(customObjectsUrl, 'GET');
+      
+      const allObjectsUrl = '/describe?limit=500';
+      const allObjects = await makeRequest(allObjectsUrl, 'GET');
+      
+      const objectDetails = allObjects._results?.map((obj: any) => ({
+        resourceName: obj.resourceName,
+        label: obj.label,
+        objectCode: obj.objectCode,
+        isCustom: obj.isCustom === true,
+        description: obj.description,
+        childResources: obj.childResources?.map((child: any) => child.resourceName) || [],
+        httpMethods: obj.httpMethods || []
+      })) || [];
+      
+      res.json({
+        success: true,
+        objects: objectDetails,
+        count: objectDetails.length,
+        customCount: customObjects._totalCount || 0
+      });
+    } else {
+      // Just return object names
+      const objects = await discoverAllObjects();
+      res.json({
+        success: true,
+        objects,
+        count: objects.length
+      });
+    }
   } catch (error) {
     res.json({
       success: false,
