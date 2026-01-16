@@ -1354,10 +1354,23 @@ async function formatResponse(execution: any): Promise<string> {
       return '❌ No custom objects found';
     }
     
-    listSteps.forEach((step: any, i: number) => {
+    // Get display labels for all objects
+    const displayPromises = listSteps.map(async (step: any) => {
       const stepType = step.childType || step.objectType;
       const stepCount = step.recordCount || 0;
-      reply += `${i + 1}. **${stepType}**: ${stepCount} records\n`;
+      const displayLabel = await getObjectLabel(stepType);
+      
+      return {
+        label: displayLabel,
+        resourceName: stepType,
+        count: stepCount
+      };
+    });
+    
+    const displayItems = await Promise.all(displayPromises);
+    
+    displayItems.forEach((item, i) => {
+      reply += `${i + 1}. **${item.label}** (${item.resourceName}): ${item.count} records\n`;
     });
     
     reply += `\n_Total: ${listSteps.length} custom objects with data_`;
@@ -1469,7 +1482,8 @@ async function formatResponse(execution: any): Promise<string> {
   }
   
   // Standard list response
-  let reply = `✅ **Found ${count} ${actualType}**\n\n`;
+  const displayLabel = await getObjectLabel(actualType);
+  let reply = `✅ **Found ${count} ${displayLabel}**\n\n`;
   
   if (finalResult.result._results && finalResult.result._results.length > 0) {
     const items = finalResult.result._results.slice(0, 15).map((item: any, i: number) => {
