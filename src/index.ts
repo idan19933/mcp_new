@@ -676,7 +676,7 @@ async function analyzeUserRequest(message: string): Promise<any> {
     return fallbackAnalysis(message);
   }
 
-  const systemPrompt = `You are a Clarity PPM API expert that uses intelligent metadata discovery.
+  let systemPrompt = `You are a Clarity PPM API expert that uses intelligent metadata discovery.
 
 **YOUR PROCESS:**
 1. Analyze the user's natural language request
