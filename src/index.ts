@@ -125,6 +125,7 @@ let discoveredObjectsTimestamp = 0;
 
 // Cache for object labels (resourceName -> display label)
 const objectLabelsCache = new Map<string, string>();
+const objectLabelToResourceCache = new Map<string, string>(); // Reverse: label -> resourceName
 
 /**
  * Gets the display label for an object (e.g., custLoadingTaskszs -> "טעינת משימות")
@@ -142,6 +143,7 @@ async function getObjectLabel(resourceName: string): Promise<string> {
     if (result._results && result._results.length > 0) {
       const label = result._results[0].label || resourceName;
       objectLabelsCache.set(resourceName, label);
+      objectLabelToResourceCache.set(label.toLowerCase(), resourceName); // Reverse mapping
       return label;
     }
   } catch (error) {
@@ -151,6 +153,45 @@ async function getObjectLabel(resourceName: string): Promise<string> {
   // Fallback to resourceName
   objectLabelsCache.set(resourceName, resourceName);
   return resourceName;
+}
+
+/**
+ * Gets the resourceName from a display label (e.g., "טעינת משימות" -> custLoadingTaskszs)
+ */
+async function getResourceNameFromLabel(label: string): Promise<string | null> {
+  const lowerLabel = label.toLowerCase();
+  
+  // Check cache first
+  if (objectLabelToResourceCache.has(lowerLabel)) {
+    return objectLabelToResourceCache.get(lowerLabel)!;
+  }
+  
+  try {
+    // Search all custom objects
+    const result = await makeRequest(
+      `/describe?filter=(isCustom = true) and (isSystem = false)&limit=500`,
+      'GET'
+    );
+    
+    if (result._results) {
+      // Build reverse cache
+      for (const obj of result._results) {
+        if (obj.label && obj.resourceName) {
+          objectLabelsCache.set(obj.resourceName, obj.label);
+          objectLabelToResourceCache.set(obj.label.toLowerCase(), obj.resourceName);
+        }
+      }
+      
+      // Try to find match
+      if (objectLabelToResourceCache.has(lowerLabel)) {
+        return objectLabelToResourceCache.get(lowerLabel)!;
+      }
+    }
+  } catch (error) {
+    console.warn(`[Labels] Could not reverse lookup label: ${label}`);
+  }
+  
+  return null;
 }
 
 /**
@@ -1056,7 +1097,31 @@ Respond ONLY with the JSON execution plan. No explanations.`;
     
     if (customObjects.length > 0) {
       console.log(`[AI] Found ${customObjects.length} custom objects:`, customObjects.slice(0, 10).join(', '));
-      availableObjectsHint = `\n\nAVAILABLE CUSTOM OBJECTS (use these for custom data): ${customObjects.slice(0, 30).join(', ')}`;
+      
+      // Build label mapping for custom objects
+      const customObjUrl = `/describe?filter=(isCustom = true) and (isSystem = false)&limit=500`;
+      const customObjResult = await makeRequest(customObjUrl, 'GET');
+      
+      const labelMappings: string[] = [];
+      if (customObjResult._results) {
+        customObjResult._results.forEach((obj: any) => {
+          if (obj.resourceName && obj.label) {
+            labelMappings.push(`"${obj.label}" = ${obj.resourceName}`);
+            // Cache it
+            objectLabelsCache.set(obj.resourceName, obj.label);
+            objectLabelToResourceCache.set(obj.label.toLowerCase(), obj.resourceName);
+          }
+        });
+      }
+      
+      availableObjectsHint = `\n\nAVAILABLE CUSTOM OBJECTS (use these for custom data):\n`;
+      availableObjectsHint += `${customObjects.slice(0, 30).join(', ')}\n\n`;
+      
+      if (labelMappings.length > 0) {
+        availableObjectsHint += `LABEL TO RESOURCE MAPPING (use resourceName in queries):\n`;
+        availableObjectsHint += labelMappings.slice(0, 20).join('\n');
+      }
+      
       systemPrompt += availableObjectsHint;
     } else {
       console.log('[AI] No custom objects found');
