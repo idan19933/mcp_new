@@ -606,6 +606,28 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     method = 'POST';
     body = intent.data || {};
     
+    console.log(`[QueryBuilder] CREATE operation for ${intent.objectType}`);
+    console.log(`[QueryBuilder] Data to create:`, JSON.stringify(body, null, 2));
+    
+    // For custom objects, ensure both name and code exist
+    if (intent.objectType && intent.objectType.toLowerCase().startsWith('cust')) {
+      if (body.name && !body.code) {
+        // Generate code from name if not provided
+        body.code = body.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase() + '_' + Date.now();
+        console.log(`[QueryBuilder] Auto-generated code: ${body.code}`);
+      } else if (!body.name && body.code) {
+        // Use code as name if name not provided
+        body.name = body.code;
+        console.log(`[QueryBuilder] Using code as name: ${body.name}`);
+      } else if (!body.name && !body.code) {
+        // Generate both if neither provided
+        const timestamp = Date.now();
+        body.name = `record_${timestamp}`;
+        body.code = `record_${timestamp}`;
+        console.log(`[QueryBuilder] Auto-generated name and code: ${body.name}`);
+      }
+    }
+    
     // Handle parent-child create (e.g., create task in project)
     if (intent.parentId && intent.childType) {
       let actualParentId = intent.parentId;
@@ -626,6 +648,9 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
       const childMetadata = await getObjectMetadata(intent.childType);
       metadata.attributes = childMetadata.attributes;
     }
+    
+    console.log(`[QueryBuilder] Final CREATE path: ${path}`);
+    console.log(`[QueryBuilder] Final CREATE body:`, JSON.stringify(body, null, 2));
     
     // Resolve lookup values in data
     if (body && typeof body === 'object') {
@@ -974,7 +999,7 @@ A: {
       "objectType": "custPs",
       "data": {
         "name": "test",
-        "code": "test_" + Date.now()
+        "code": "test"
       }
     }
   ],
@@ -1084,7 +1109,8 @@ A: {
 8. For UPDATING TASKS - Include parentId and childType to maintain project context
 9. For creating TASKS - Only "name" is required. Optional: durationDays, percentComplete, startDate, finishDate
 10. For creating PROJECTS - "name" and "code" are required. Optional: status, manager, scheduleStart, scheduleFinish
-11. Use correct field names: taskOwner (not assignedTo), assignedResources, status, percentComplete, startDate, finishDate
+11. For creating CUSTOM OBJECTS (starting with 'cust') - Provide "name" and optionally "code". If code not provided, it will be auto-generated
+12. Use correct field names: taskOwner (not assignedTo), assignedResources, status, percentComplete, startDate, finishDate
 
 User Query: "${message}"
 
@@ -1313,11 +1339,11 @@ async function formatResponse(execution: any): Promise<string> {
   const intent = execution.plan?.intent || '';
   
   // Get the actual child type if this is a parent-child query
-  const finalStep = execution.plan?.steps?.[execution.plan.steps.length - 1];
+  const finalStep = execution.plan?.steps?.[execution.plan.steps?.length - 1];
   const actualType = finalStep?.childType || objectType;
   
   // Handle "list all custom objects" - multiple LIST steps
-  if (intent.includes('list') && intent.includes('custom') && execution.results.length > 3) {
+  if (intent.includes('list') && intent.includes('custom') && execution.results?.length > 3) {
     let reply = `📋 **Custom Objects in System**\n\n`;
     
     const listSteps = execution.results.filter((r: any) => 
@@ -1339,7 +1365,7 @@ async function formatResponse(execution: any): Promise<string> {
   }
   
   // Handle "count all custom objects" - multiple COUNT steps
-  if (intent.includes('count') && intent.includes('custom') && execution.results.length > 3) {
+  if (intent.includes('count') && intent.includes('custom') && execution.results?.length > 3) {
     let reply = `📊 **Custom Objects in System**\n\n`;
     
     const countSteps = execution.results.filter((r: any) => 
@@ -1389,13 +1415,17 @@ async function formatResponse(execution: any): Promise<string> {
     }
     
     const newId = finalResult.result._internalId || finalResult.result.code;
+    const newName = finalResult.result.name || 'Unnamed';
+    const newCode = finalResult.result.code || '';
     const displayLabel = await getObjectLabel(actualType);
     
-    if (newId) {
-      return `✅ **Created ${displayLabel}** (ID: ${newId})`;
-    } else {
-      return `✅ **Created ${displayLabel}**`;
+    let details = `(ID: ${newId}`;
+    if (newCode && newCode !== newId) {
+      details += `, Code: ${newCode}`;
     }
+    details += ')';
+    
+    return `✅ **Created ${displayLabel}**\n${details}\nName: ${newName}`;
   }
   
   // Handle UPDATE operations
