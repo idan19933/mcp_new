@@ -168,7 +168,16 @@ async function discoverAllObjects(): Promise<string[]> {
     discoveredObjects = Array.from(objectNames);
     discoveredObjectsTimestamp = now;
     
-    console.log(`[Discovery] Found ${discoveredObjects.length} objects (including ${customObjects._totalCount || 0} custom)`);
+    console.log(`[Discovery] Found ${discoveredObjects.length} total objects`);
+    console.log(`[Discovery] Custom objects count: ${customObjects._totalCount || 0}`);
+    
+    if (customObjects._results && customObjects._results.length > 0) {
+      const customNames = customObjects._results
+        .map((obj: any) => obj.resourceName)
+        .filter(Boolean)
+        .slice(0, 10);
+      console.log(`[Discovery] Sample custom objects:`, customNames.join(', '));
+    }
     
     return discoveredObjects;
   } catch (error) {
@@ -999,16 +1008,31 @@ Respond ONLY with the JSON execution plan. No explanations.`;
   let availableObjectsHint = '';
   try {
     const objects = await discoverAllObjects();
-    const customObjects = objects.filter(o => 
-      !['projects', 'tasks', 'resources', 'teams', 'ideas', 'risks', 'issues'].includes(o)
-    );
+    
+    // Filter to get custom objects - these typically start with 'cust' or are user-created
+    const standardObjects = [
+      'projects', 'tasks', 'resources', 'teams', 'ideas', 'risks', 'issues',
+      'timesheets', 'allocations', 'assignments', 'users', 'agreements',
+      'portfolios', 'programs', 'milestones', 'dependencies', 'workProducts',
+      'investments', 'objectives', 'roadmaps', 'conversations', 'documents',
+      'captcha', 'certs', 'changes', 'metadata', 'describe', 'lookup'
+    ];
+    
+    const customObjects = objects.filter(o => {
+      const lower = o.toLowerCase();
+      // Include if starts with 'cust' OR not in standard list
+      return lower.startsWith('cust') || !standardObjects.includes(lower);
+    });
     
     if (customObjects.length > 0) {
-      availableObjectsHint = `\n\nAVAILABLE CUSTOM OBJECTS: ${customObjects.slice(0, 20).join(', ')}`;
+      console.log(`[AI] Found ${customObjects.length} custom objects:`, customObjects.slice(0, 10).join(', '));
+      availableObjectsHint = `\n\nAVAILABLE CUSTOM OBJECTS (use these for custom data): ${customObjects.slice(0, 30).join(', ')}`;
       systemPrompt += availableObjectsHint;
+    } else {
+      console.log('[AI] No custom objects found');
     }
   } catch (error) {
-    console.warn('[AI] Could not fetch available objects for context');
+    console.warn('[AI] Could not fetch available objects for context:', error);
   }
 
   try {
@@ -1253,6 +1277,14 @@ app.get('/health', (req, res) => {
 app.get('/api/discover', async (req, res) => {
   try {
     const detailed = req.query.detailed === 'true';
+    const refresh = req.query.refresh === 'true';
+    
+    // Force refresh if requested
+    if (refresh) {
+      discoveredObjects = null;
+      discoveredObjectsTimestamp = 0;
+      console.log('[API] Forced discovery cache refresh');
+    }
     
     if (detailed) {
       // Get detailed information about all objects
