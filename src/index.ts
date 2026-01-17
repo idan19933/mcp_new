@@ -971,7 +971,16 @@ Respond ONLY with the JSON execution plan. No explanations.`;
 }
 
 function fallbackAnalysis(message: string): any {
-  const lower = message.toLowerCase();
+  const lower = message.toLowerCase().trim();
+  
+  // Handle greetings
+  if (/^(hi|hello|hey|greetings|good morning|good afternoon|good evening)$/i.test(lower)) {
+    return {
+      steps: [],
+      message: "Hello! I'm your Clarity AI assistant. I can help you with:\n\n• View projects, tasks, and custom objects\n• Create visual analytics and distributions\n• Count records and generate reports\n• Create and update data\n\nTry asking: 'Show task distribution for project Alpha' or 'How many active projects?'",
+      intent: 'greeting'
+    };
+  }
   
   // Check for distribution/analytics keywords
   if (/distribution|breakdown|analyze|group.*by/i.test(lower)) {
