@@ -1,8 +1,8 @@
 /**
- * Clarity PPM HTTP Server v4.0.0 - Enhanced Intelligent Describe Edition
- * - Uses /describe and /describeAttributes for dynamic schema discovery
- * - Supports multiple filter combinations for different object types
- * - Intelligent caching and query optimization
+ * Clarity PPM HTTP Server v4.1.0 - Visual Analytics Edition
+ * - Enhanced with distribution and analytics support
+ * - Automatic chart data preparation
+ * - Smart grouping for visualizations
  */
 
 import express, { Request, Response } from 'express';
@@ -110,71 +110,57 @@ interface AttributeMetadata {
   required: boolean;
   isLookup: boolean;
   lookupType?: string;
-  lookupValues?: Array<{ code: string; displayValue: string }>;  // Added for lookup resolution
+  lookupValues?: Array<{ code: string; displayValue: string }>;
   maxLength?: number;
   isCustom: boolean;
-  actionType?: string;  // Added to track filter-only fields
+  actionType?: string;
 }
 
 const metadataCache = new Map<string, ObjectMetadata>();
 const CACHE_TTL = 1000 * 60 * 15; // 15 minutes
 
-// Cache for discovered objects
 let discoveredObjects: string[] | null = null;
 let discoveredObjectsTimestamp = 0;
 
-// Cache for object labels (resourceName -> display label)
 const objectLabelsCache = new Map<string, string>();
-const objectLabelToResourceCache = new Map<string, string>(); // Reverse: label -> resourceName
+const objectLabelToResourceCache = new Map<string, string>();
 
-/**
- * Gets the display label for an object (e.g., custLoadingTaskszs -> "טעינת משימות")
- */
 async function getObjectLabel(resourceName: string): Promise<string> {
-  // Check cache first
   if (objectLabelsCache.has(resourceName)) {
     return objectLabelsCache.get(resourceName)!;
   }
   
   try {
-    // Fetch from /describe
     const result = await makeRequest(`/describe?filter=(resourceName = '${resourceName}')&limit=1`, 'GET');
     
     if (result._results && result._results.length > 0) {
       const label = result._results[0].label || resourceName;
       objectLabelsCache.set(resourceName, label);
-      objectLabelToResourceCache.set(label.toLowerCase(), resourceName); // Reverse mapping
+      objectLabelToResourceCache.set(label.toLowerCase(), resourceName);
       return label;
     }
   } catch (error) {
     console.warn(`[Labels] Could not fetch label for ${resourceName}`);
   }
   
-  // Fallback to resourceName
   objectLabelsCache.set(resourceName, resourceName);
   return resourceName;
 }
 
-/**
- * Gets the resourceName from a display label (e.g., "טעינת משימות" -> custLoadingTaskszs)
- */
 async function getResourceNameFromLabel(label: string): Promise<string | null> {
   const lowerLabel = label.toLowerCase();
   
-  // Check cache first
   if (objectLabelToResourceCache.has(lowerLabel)) {
     return objectLabelToResourceCache.get(lowerLabel)!;
   }
   
   try {
-    // Search all custom objects
     const result = await makeRequest(
       `/describe?filter=(isCustom = true) and (isSystem = false)&limit=500`,
       'GET'
     );
     
     if (result._results) {
-      // Build reverse cache
       for (const obj of result._results) {
         if (obj.label && obj.resourceName) {
           objectLabelsCache.set(obj.resourceName, obj.label);
@@ -182,7 +168,6 @@ async function getResourceNameFromLabel(label: string): Promise<string | null> {
         }
       }
       
-      // Try to find match
       if (objectLabelToResourceCache.has(lowerLabel)) {
         return objectLabelToResourceCache.get(lowerLabel)!;
       }
@@ -194,13 +179,9 @@ async function getResourceNameFromLabel(label: string): Promise<string | null> {
   return null;
 }
 
-/**
- * Discovers all available objects (standard + custom) from Clarity PPM
- */
 async function discoverAllObjects(): Promise<string[]> {
   const now = Date.now();
   
-  // Return cached if still valid
   if (discoveredObjects && (now - discoveredObjectsTimestamp) < CACHE_TTL) {
     return discoveredObjects;
   }
@@ -208,17 +189,14 @@ async function discoverAllObjects(): Promise<string[]> {
   try {
     console.log('[Discovery] Fetching all objects from /describe...');
     
-    // Get all objects (standard + custom)
     const allObjectsUrl = '/describe?limit=500';
     const allObjects = await makeRequest(allObjectsUrl, 'GET');
     
-    // Get custom objects specifically
     const customObjectsUrl = '/describe?filter=(isCustom = true) and (isSystem = false)&limit=500';
     const customObjects = await makeRequest(customObjectsUrl, 'GET');
     
     const objectNames = new Set<string>();
     
-    // Add all standard objects
     if (allObjects._results) {
       allObjects._results.forEach((obj: any) => {
         if (obj.resourceName) {
@@ -227,7 +205,6 @@ async function discoverAllObjects(): Promise<string[]> {
       });
     }
     
-    // Ensure custom objects are included
     if (customObjects._results) {
       customObjects._results.forEach((obj: any) => {
         if (obj.resourceName) {
@@ -254,7 +231,6 @@ async function discoverAllObjects(): Promise<string[]> {
   } catch (error) {
     console.error('[Discovery] Failed to discover objects:', error);
     
-    // Fallback to known standard objects
     discoveredObjects = [
       'projects', 'tasks', 'resources', 'teams', 'ideas', 'risks', 'issues',
       'timesheets', 'timeEntries', 'allocations', 'assignments', 'investments',
@@ -265,27 +241,22 @@ async function discoverAllObjects(): Promise<string[]> {
   }
 }
 
-/**
- * Resolves a human-readable lookup value to its API code
- * E.g., "Completed" -> "C", "Active" -> "A"
- */
 function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, displayValue: string): string {
   const attribute = metadata.attributes.find(attr => attr.apiName === fieldName);
   
   if (!attribute || !attribute.isLookup) {
     console.log(`[LookupResolver] ${fieldName} is not a lookup field`);
-    return displayValue; // Not a lookup field
+    return displayValue;
   }
   
   if (!attribute.lookupValues || attribute.lookupValues.length === 0) {
     console.warn(`[LookupResolver] No lookup values available for ${fieldName}. Metadata might not include them.`);
-    return displayValue; // No values available
+    return displayValue;
   }
   
   console.log(`[LookupResolver] Available values for ${fieldName}:`, 
     JSON.stringify(attribute.lookupValues.map(lv => ({ code: lv.code, display: lv.displayValue })), null, 2));
   
-  // Try exact match first (case-insensitive)
   const lowerDisplay = displayValue.toLowerCase();
   const exactMatch = attribute.lookupValues.find(lv => 
     lv.displayValue?.toLowerCase() === lowerDisplay
@@ -296,7 +267,6 @@ function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, display
     return exactMatch.code;
   }
   
-  // Try partial match
   const partialMatch = attribute.lookupValues.find(lv =>
     lv.displayValue?.toLowerCase().includes(lowerDisplay) ||
     lowerDisplay.includes(lv.displayValue?.toLowerCase() || '')
@@ -307,7 +277,6 @@ function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, display
     return partialMatch.code;
   }
   
-  // Check if it's already a code
   const codeMatch = attribute.lookupValues.find(lv => lv.code === displayValue);
   if (codeMatch) {
     console.log(`[LookupResolver] ✓ '${displayValue}' is already a valid code for ${fieldName}`);
@@ -317,25 +286,20 @@ function resolveLookupValue(metadata: ObjectMetadata, fieldName: string, display
   console.warn(`[LookupResolver] ✗ Could not resolve '${displayValue}' for ${fieldName}`);
   console.warn(`[LookupResolver] Available: ${attribute.lookupValues.map(lv => `${lv.code}=${lv.displayValue}`).join(', ')}`);
   
-  return displayValue; // Return as-is if no match
+  return displayValue;
 }
 
 // ============================================================================
-// METADATA DISCOVERY - Using /describe and /describeAttributes
+// METADATA DISCOVERY
 // ============================================================================
 
-/**
- * Detects the appropriate filter pattern based on object type
- */
 function detectObjectFilterPattern(objectName: string): 'full' | 'simple' {
   const lowerName = objectName.toLowerCase();
   
-  // OBA objects always use simple pattern
   if (lowerName.startsWith('oba')) {
     return 'simple';
   }
   
-  // Standard objects use full pattern
   const standardObjects = [
     'projects', 'tasks', 'resources', 'timesheets', 'ideas', 'risks', 
     'issues', 'users', 'allocations', 'agreements'
@@ -345,20 +309,12 @@ function detectObjectFilterPattern(objectName: string): 'full' | 'simple' {
     return 'full';
   }
   
-  // Custom objects: try full first, can fall back to simple
   return 'full';
 }
 
-/**
- * Gets comprehensive metadata for a specific object
- * Supports multiple filter combinations:
- * - Full: honorFieldLevelSecurity + dataType filter + includeObjFilters + actionType
- * - Simple: honorFieldLevelSecurity only
- */
 async function getObjectMetadata(objectName: string, forceRefresh: boolean = false): Promise<ObjectMetadata> {
   const cacheKey = objectName.toLowerCase();
   
-  // Check cache
   if (!forceRefresh && metadataCache.has(cacheKey)) {
     const cached = metadataCache.get(cacheKey)!;
     if (Date.now() - cached.lastUpdated < CACHE_TTL) {
@@ -370,26 +326,17 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
   console.log(`[Metadata] Fetching metadata for ${objectName}...`);
   
   try {
-    // Step 1: Get object-level metadata
     const describeResult = await makeRequest(
       `/describe/${objectName}?filter=(excludeAttributes = false)`
     );
     
-    // Step 2: Detect filter pattern
     const filterPattern = detectObjectFilterPattern(objectName);
     
-    // Step 3: Build describeAttributes query
     let attributesUrl: string;
     
     if (filterPattern === 'full') {
-      // Full filter pattern for standard and complex custom objects
-      // Pattern: (resourceName='X') and (honorFieldLevelSecurity=true) and 
-      //          (dataType notIn ('clob','attachment')) and (includeObjFilters=true) and 
-      //          (actionType!='dataOnly')
       attributesUrl = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true) and (dataType notIn ('clob','attachment')) and (includeObjFilters = true) and (actionType != 'dataOnly'))&limit=1500&_totalCount=false`;
     } else {
-      // Simple filter pattern for OBA and simple custom objects
-      // Pattern: (resourceName='X') and (honorFieldLevelSecurity=true)
       attributesUrl = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true))&limit=1500&_totalCount=false`;
     }
     
@@ -399,7 +346,6 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
     try {
       attributesResult = await makeRequest(attributesUrl);
     } catch (error) {
-      // If full pattern fails, try simple pattern
       if (filterPattern === 'full') {
         console.log(`[Metadata] Full pattern failed, trying simple pattern...`);
         attributesUrl = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true))&limit=1500&_totalCount=false`;
@@ -409,7 +355,6 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
       }
     }
     
-    // Process attributes
     const attributes: AttributeMetadata[] = (attributesResult._results || []).map((attr: any) => ({
       apiName: attr.apiName || attr.name,
       dataType: attr.dataType || 'string',
@@ -417,13 +362,12 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
       required: attr.required === true,
       isLookup: attr.dataType === 'lookup',
       lookupType: attr.lookupType,
-      lookupValues: attr.lookupValues || attr.validValues || [],  // Capture lookup values
+      lookupValues: attr.lookupValues || attr.validValues || [],
       maxLength: attr.maxLength,
       isCustom: attr.isCustom === true,
-      actionType: attr.actionType  // Capture if field is filterOnly/dataOnly
+      actionType: attr.actionType
     }));
     
-    // Build metadata object
     const metadata: ObjectMetadata = {
       resourceName: objectName,
       objectCode: describeResult.objectCode || objectName,
@@ -435,7 +379,6 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
       lastUpdated: Date.now()
     };
     
-    // Cache it
     metadataCache.set(cacheKey, metadata);
     console.log(`[Metadata] Cached ${attributes.length} attributes for ${objectName}`);
     
@@ -447,31 +390,22 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
   }
 }
 
-/**
- * Gets smart field selection based on metadata
- * Filters out CLOB, attachment, and filter-only field types
- */
 function getSmartFieldSelection(metadata: ObjectMetadata, maxFields: number = 15): string[] {
   const priorityFields = ['_internalId', 'name', 'code', 'uniqueName', 'status'];
   
   const filteredAttributes = metadata.attributes
     .filter(attr => {
-      // Exclude problematic types
       if (attr.dataType === 'clob' || attr.dataType === 'attachment') return false;
       if (attr.apiName === 'attachment') return false;
       
-      // Exclude filter-only fields (actionType = 'filterOnly' or 'dataOnly')
       if (attr.actionType === 'filterOnly' || attr.actionType === 'dataOnly') return false;
       
-      // Include priority fields
       if (priorityFields.includes(attr.apiName)) return true;
       
-      // Include reasonable fields
       return attr.apiName !== '_links' && 
              (!attr.apiName.startsWith('_') || attr.apiName === '_internalId');
     })
     .sort((a, b) => {
-      // Sort by priority
       const aPriority = priorityFields.indexOf(a.apiName);
       const bPriority = priorityFields.indexOf(b.apiName);
       if (aPriority !== -1 && bPriority !== -1) return aPriority - bPriority;
@@ -496,47 +430,39 @@ interface QueryIntent {
   parentId?: string;
   childType?: string;
   limit?: number;
-  recordId?: number | string;  // For update/delete operations
-  data?: Record<string, any>;  // For create/update operations
+  recordId?: number | string;
+  data?: Record<string, any>;
 }
 
 async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[]): Promise<any> {
   console.log('[QueryBuilder] Building query for:', JSON.stringify(intent, null, 2));
   
-  // Get metadata
   const metadata = await getObjectMetadata(intent.objectType);
   
-  // Build query/request based on operation
   let path = `/${intent.objectType}`;
   let method = 'GET';
   let query: Record<string, string | number> = {};
   let body: any = null;
   
-  // Handle UPDATE operation
   if (intent.operation === 'update' && intent.recordId) {
     let actualRecordId = intent.recordId;
     
-    // Check if recordId is a reference to previous step
     if (typeof actualRecordId === 'string' && actualRecordId.includes('STEP_')) {
       const stepMatch = actualRecordId.match(/STEP_(\d+)_ID/);
       if (stepMatch && previousResults) {
         const stepIndex = parseInt(stepMatch[1]) - 1;
         const previousResult = previousResults[stepIndex];
         
-        // Extract ID from previous result
         if (previousResult?.result?._internalId) {
-          // Single record created/updated
           actualRecordId = previousResult.result._internalId;
           console.log(`[QueryBuilder] Resolved ${intent.recordId} to ${actualRecordId}`);
         } else if (previousResult?.result?._results?.[0]?._internalId) {
-          // List result - get first record
           actualRecordId = previousResult.result._results[0]._internalId;
           console.log(`[QueryBuilder] Resolved ${intent.recordId} to ${actualRecordId}`);
         }
       }
     }
     
-    // Handle parent-child UPDATE (e.g., update task in project)
     if (intent.parentId && intent.childType) {
       let actualParentId = intent.parentId;
       if (typeof actualParentId === 'string' && actualParentId.includes('STEP_')) {
@@ -552,14 +478,12 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
       }
       path = `/${intent.objectType}/${actualParentId}/${intent.childType}/${actualRecordId}`;
       
-      // Get child metadata for lookup resolution
       const childMetadata = await getObjectMetadata(intent.childType);
       metadata.attributes = childMetadata.attributes;
     } else {
       path = `/${intent.objectType}/${actualRecordId}`;
     }
     
-    // Resolve lookup values in data
     body = intent.data || {};
     if (body && typeof body === 'object') {
       const resolvedBody: Record<string, any> = {};
@@ -571,11 +495,9 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
         }
       }
       
-      // Apply business logic based on status changes
       if (resolvedBody.status && intent.childType === 'tasks') {
         const statusValue = String(resolvedBody.status).toLowerCase();
         
-        // If setting to completed/complete/closed, also set percentComplete to 100
         if (statusValue.includes('complet') || statusValue.includes('close') || 
             statusValue === 'c' || statusValue === 'co') {
           if (!resolvedBody.percentComplete) {
@@ -584,7 +506,6 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
           }
         }
         
-        // If setting to planning/not started, set percentComplete to 0
         if (statusValue.includes('plan') || statusValue.includes('not') || 
             statusValue === 'p' || statusValue === 'ns') {
           if (!resolvedBody.percentComplete) {
@@ -601,7 +522,6 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     return { path, query: {}, metadata, method, body };
   }
   
-  // Handle CREATE operation
   if (intent.operation === 'create') {
     method = 'POST';
     body = intent.data || {};
@@ -609,18 +529,14 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     console.log(`[QueryBuilder] CREATE operation for ${intent.objectType}`);
     console.log(`[QueryBuilder] Data to create:`, JSON.stringify(body, null, 2));
     
-    // For custom objects, ensure both name and code exist
     if (intent.objectType && intent.objectType.toLowerCase().startsWith('cust')) {
       if (body.name && !body.code) {
-        // Generate code from name if not provided
         body.code = body.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase() + '_' + Date.now();
         console.log(`[QueryBuilder] Auto-generated code: ${body.code}`);
       } else if (!body.name && body.code) {
-        // Use code as name if name not provided
         body.name = body.code;
         console.log(`[QueryBuilder] Using code as name: ${body.name}`);
       } else if (!body.name && !body.code) {
-        // Generate both if neither provided
         const timestamp = Date.now();
         body.name = `record_${timestamp}`;
         body.code = `record_${timestamp}`;
@@ -628,7 +544,6 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
       }
     }
     
-    // Handle parent-child create (e.g., create task in project)
     if (intent.parentId && intent.childType) {
       let actualParentId = intent.parentId;
       if (typeof actualParentId === 'string' && actualParentId.includes('STEP_')) {
@@ -644,7 +559,6 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
       }
       path = `/${intent.objectType}/${actualParentId}/${intent.childType}`;
       
-      // Get child metadata for lookup resolution
       const childMetadata = await getObjectMetadata(intent.childType);
       metadata.attributes = childMetadata.attributes;
     }
@@ -652,7 +566,6 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     console.log(`[QueryBuilder] Final CREATE path: ${path}`);
     console.log(`[QueryBuilder] Final CREATE body:`, JSON.stringify(body, null, 2));
     
-    // Resolve lookup values in data
     if (body && typeof body === 'object') {
       const resolvedBody: Record<string, any> = {};
       for (const [key, value] of Object.entries(body)) {
@@ -663,11 +576,9 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
         }
       }
       
-      // Apply business logic based on status
       if (resolvedBody.status && intent.childType === 'tasks') {
         const statusValue = String(resolvedBody.status).toLowerCase();
         
-        // If creating as completed, set percentComplete to 100
         if (statusValue.includes('complet') || statusValue.includes('close') || 
             statusValue === 'c' || statusValue === 'co') {
           if (!resolvedBody.percentComplete) {
@@ -683,12 +594,9 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     return { path, query: {}, metadata, method, body };
   }
   
-  // Handle parent-child relationships for GET/LIST/COUNT
   if (intent.parentId && intent.childType) {
-    // Check if parentId is a reference to previous step
     let actualParentId = intent.parentId;
     if (typeof actualParentId === 'string' && actualParentId.includes('STEP_')) {
-      // Extract step number (e.g., "STEP_1_ID" -> step 1)
       const stepMatch = actualParentId.match(/STEP_(\d+)_ID/);
       if (stepMatch && previousResults) {
         const stepIndex = parseInt(stepMatch[1]) - 1;
@@ -702,17 +610,14 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     
     path = `/${intent.objectType}/${actualParentId}/${intent.childType}`;
     
-    // Get child metadata
     const childMetadata = await getObjectMetadata(intent.childType);
     metadata.attributes = childMetadata.attributes;
   }
   
-  // Set fields for GET/LIST operations
   if (intent.operation === 'count') {
     query.fields = '_internalId';
     query.limit = 500;
   } else if (intent.fields && intent.fields.length > 0) {
-    // Validate requested fields against metadata
     const validFields = intent.fields.filter(field => {
       const attr = metadata.attributes.find(a => a.apiName === field);
       if (!attr && field !== '_internalId') {
@@ -723,7 +628,6 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     });
     
     if (validFields.length === 0) {
-      // If no valid fields, use smart selection
       const smartFields = getSmartFieldSelection(metadata);
       query.fields = smartFields.join(',');
       console.log(`[FieldValidation] No valid fields requested, using smart selection`);
@@ -738,7 +642,6 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     query.fields = smartFields.join(',');
   }
   
-  // Set filters
   if (intent.filters && Object.keys(intent.filters).length > 0) {
     const filterParts: string[] = [];
     
@@ -759,7 +662,6 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
       : `(${filterParts.join(' and ')})`;
   }
   
-  // Set limit (create/update operations already returned above)
   if (intent.limit) {
     query.limit = Math.min(intent.limit, 500);
   } else if (!query.limit) {
@@ -770,7 +672,7 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
 }
 
 // ============================================================================
-// AI AGENT WITH CLAUDE ANALYSIS
+// AI AGENT WITH CLAUDE ANALYSIS - ENHANCED FOR VISUAL ANALYTICS
 // ============================================================================
 
 async function analyzeUserRequest(message: string): Promise<any> {
@@ -781,7 +683,7 @@ async function analyzeUserRequest(message: string): Promise<any> {
     return fallbackAnalysis(message);
   }
 
-  let systemPrompt = `You are a Clarity PPM API expert that uses intelligent metadata discovery.
+  let systemPrompt = `You are a Clarity PPM API expert that uses intelligent metadata discovery and creates visual analytics.
 
 **YOUR PROCESS:**
 1. Analyze the user's natural language request
@@ -790,9 +692,16 @@ async function analyzeUserRequest(message: string): Promise<any> {
 4. Extract any filters or conditions
 5. Return a structured execution plan
 
+**VISUAL ANALYTICS:**
+When users ask for distributions, analytics, breakdowns, or groupings:
+- ALWAYS use "list" operation to get full data (not count)
+- Include the grouping field (status, percentComplete, priority, type, category)
+- Set limit high enough to get complete picture (500 for distributions)
+- The frontend will automatically create charts for data with groupable fields
+
 **AVAILABLE OPERATIONS:**
 - count: Count records (returns total number)
-- list: List multiple records with details
+- list: List multiple records with details - USE THIS FOR DISTRIBUTIONS/ANALYTICS
 - get: Get a single specific record
 - create: Create a new record
 - update: Update an existing record
@@ -854,6 +763,74 @@ A: {
   "intent": "list_projects_by_manager"
 }
 
+Q: "Show task status distribution for project Alpha"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "name": "Alpha" },
+      "fields": ["_internalId", "name"]
+    },
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
+      "fields": ["name", "status", "percentComplete", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "task_status_distribution_visual"
+}
+
+Q: "Break down completion for project Beta"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "filters": { "name": "Beta" },
+      "fields": ["_internalId", "name"]
+    },
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "parentId": "STEP_1_ID",
+      "childType": "tasks",
+      "fields": ["name", "percentComplete", "status", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "completion_breakdown_visual"
+}
+
+Q: "Analyze task priorities"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "tasks",
+      "fields": ["name", "priority", "status", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "priority_distribution_visual"
+}
+
+Q: "Show distribution of custTaskUpdates"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "custTaskUpdates",
+      "fields": ["name", "status", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "custom_object_distribution_visual"
+}
+
 Q: "List tasks for project 5003001"
 A: {
   "steps": [
@@ -866,33 +843,6 @@ A: {
     }
   ],
   "intent": "list_project_tasks"
-}
-
-Q: "Show task updates from January"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "custTaskUpdates",
-      "filters": { "updateDate": ">= '2025-01-01T00:00:00'" },
-      "limit": 50
-    }
-  ],
-  "intent": "list_task_updates"
-}
-
-Q: "Show OBA tasks for investment 5003001"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "obaInvestments",
-      "filters": { "_internalId": 5003001 },
-      "childType": "obaTasks",
-      "limit": 100
-    }
-  ],
-  "intent": "list_oba_tasks"
 }
 
 Q: "How many tasks in project Alpha"
@@ -914,214 +864,23 @@ A: {
   "intent": "count_project_tasks"
 }
 
-Q: "Show task status distribution for project this_proj"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "code": "this_proj" },
-      "fields": ["_internalId", "name"]
-    },
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "fields": ["status", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "task_status_distribution"
-}
-
-Q: "List tasks in project Alpha"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "name": "Alpha" },
-      "fields": ["_internalId", "name"]
-    },
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "fields": ["name", "status", "percentComplete", "taskOwner", "_internalId"]
-    }
-  ],
-  "intent": "list_project_tasks"
-}
-
-Q: "How many tasks in each status for project X"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "code": "X" },
-      "fields": ["_internalId", "name"]
-    },
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "fields": ["status", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "tasks_by_status"
-}
-
-Q: "Create a project named NewProject with code NEWPROJ"
-A: {
-  "steps": [
-    {
-      "operation": "create",
-      "objectType": "projects",
-      "data": {
-        "name": "NewProject",
-        "code": "NEWPROJ"
-      }
-    }
-  ],
-  "intent": "create_project"
-}
-
-Q: "Create an instance named test in custPs custom object"
-A: {
-  "steps": [
-    {
-      "operation": "create",
-      "objectType": "custPs",
-      "data": {
-        "name": "test",
-        "code": "test"
-      }
-    }
-  ],
-  "intent": "create_custom_object_instance"
-}
-
-Q: "Create a task called Setup in project Alpha"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "name": "Alpha" },
-      "fields": ["_internalId", "name"]
-    },
-    {
-      "operation": "create",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "data": {
-        "name": "Setup"
-      }
-    }
-  ],
-  "intent": "create_task_in_project"
-}
-
-Q: "Create a task named Design with 5 days duration in project Beta"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "name": "Beta" },
-      "fields": ["_internalId", "name"]
-    },
-    {
-      "operation": "create",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "data": {
-        "name": "Design",
-        "durationDays": 5
-      }
-    }
-  ],
-  "intent": "create_task_with_duration"
-}
-
-Q: "Update project 5003001 to set status as Active"
-A: {
-  "steps": [
-    {
-      "operation": "update",
-      "objectType": "projects",
-      "recordId": 5003001,
-      "data": {
-        "status": "A"
-      }
-    }
-  ],
-  "intent": "update_project_status"
-}
-
-Q: "Create a task named Test and set it to 50% complete"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "code": "PROJECT_CODE" },
-      "fields": ["_internalId"]
-    },
-    {
-      "operation": "create",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "data": {
-        "name": "Test"
-      }
-    },
-    {
-      "operation": "update",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "recordId": "STEP_2_ID",
-      "data": {
-        "percentComplete": 50
-      }
-    }
-  ],
-  "intent": "create_and_update_task"
-}
-
 **IMPORTANT RULES:**
-1. For "how many X in project Y" - Use TWO steps: find project, then count its children
-2. For distributions/grouping - List all items with status field, client will group
-3. Use parentId: "STEP_1_ID" to reference previous step results
-4. Use recordId: "STEP_X_ID" to update a record from a previous step
-5. Always include _internalId in project lookup steps
-6. For CREATE operations - Use "data" field with required attributes
-7. For UPDATE operations - Use "recordId" and "data" with fields to update
-8. For UPDATING TASKS - Include parentId and childType to maintain project context
-9. For creating TASKS - Only "name" is required. Optional: durationDays, percentComplete, startDate, finishDate
-10. For creating PROJECTS - "name" and "code" are required. Optional: status, manager, scheduleStart, scheduleFinish
-11. For creating CUSTOM OBJECTS (starting with 'cust') - Provide "name" and optionally "code". If code not provided, it will be auto-generated
-12. Use correct field names: taskOwner (not assignedTo), assignedResources, status, percentComplete, startDate, finishDate
+1. For "distribution", "breakdown", "analyze" queries - Use LIST operation with limit=500
+2. Include groupable fields: status, percentComplete, priority, type, category
+3. For "how many" queries - Use COUNT operation
+4. For parent-child queries - Use TWO steps with parentId: "STEP_1_ID"
+5. Always include _internalId in field selection
+6. For CREATE/UPDATE - Use "data" field with required attributes
+7. Visual analytics keywords: distribution, breakdown, analyze, show breakdown, group by
 
 User Query: "${message}"
 
 Respond ONLY with the JSON execution plan. No explanations.`;
 
-  // Discover available objects to inform AI
   let availableObjectsHint = '';
   try {
     const objects = await discoverAllObjects();
     
-    // Filter to get custom objects - these typically start with 'cust' or are user-created
     const standardObjects = [
       'projects', 'tasks', 'resources', 'teams', 'ideas', 'risks', 'issues',
       'timesheets', 'allocations', 'assignments', 'users', 'agreements',
@@ -1132,14 +891,12 @@ Respond ONLY with the JSON execution plan. No explanations.`;
     
     const customObjects = objects.filter(o => {
       const lower = o.toLowerCase();
-      // Include if starts with 'cust' OR not in standard list
       return lower.startsWith('cust') || !standardObjects.includes(lower);
     });
     
     if (customObjects.length > 0) {
       console.log(`[AI] Found ${customObjects.length} custom objects:`, customObjects.slice(0, 10).join(', '));
       
-      // Build label mapping for custom objects
       const customObjUrl = `/describe?filter=(isCustom = true) and (isSystem = false)&limit=500`;
       const customObjResult = await makeRequest(customObjUrl, 'GET');
       
@@ -1148,7 +905,6 @@ Respond ONLY with the JSON execution plan. No explanations.`;
         customObjResult._results.forEach((obj: any) => {
           if (obj.resourceName && obj.label) {
             labelMappings.push(`"${obj.label}" = ${obj.resourceName}`);
-            // Cache it
             objectLabelsCache.set(obj.resourceName, obj.label);
             objectLabelToResourceCache.set(obj.label.toLowerCase(), obj.resourceName);
           }
@@ -1217,6 +973,21 @@ Respond ONLY with the JSON execution plan. No explanations.`;
 function fallbackAnalysis(message: string): any {
   const lower = message.toLowerCase();
   
+  // Check for distribution/analytics keywords
+  if (/distribution|breakdown|analyze|group.*by/i.test(lower)) {
+    if (/task/i.test(lower)) {
+      return {
+        steps: [{
+          operation: 'list',
+          objectType: 'tasks',
+          fields: ['name', 'status', 'percentComplete', 'priority', '_internalId'],
+          limit: 500
+        }],
+        intent: 'task_distribution_visual'
+      };
+    }
+  }
+  
   if (/how many.*project/i.test(lower)) {
     return {
       steps: [{
@@ -1266,24 +1037,21 @@ async function executePlan(plan: any): Promise<any> {
     console.log(`\n[Step ${i + 1}/${plan.steps.length}] ${step.operation} on ${step.objectType}`);
     
     try {
-      // Build intelligent query with access to previous results
       const { path, query, metadata, method, body } = await buildIntelligentQuery(step, results);
       
-      // Build URL with query parameters
       const queryString = Object.keys(query).length > 0
         ? '?' + new URLSearchParams(
             Object.entries(query).map(([k, v]) => [k, String(v)] as [string, string])
           ).toString()
         : '';
       
-      // Execute request
       const result = await makeRequest(`${path}${queryString}`, method || 'GET', body);
       
       results.push({
         step: i + 1,
         operation: step.operation,
         objectType: step.objectType,
-        childType: step.childType,  // Preserve childType for response formatting
+        childType: step.childType,
         result,
         recordCount: result._totalCount || result._results?.length || (result._internalId ? 1 : 0)
       });
@@ -1308,7 +1076,7 @@ async function executePlan(plan: any): Promise<any> {
 }
 
 // ============================================================================
-// FORMAT RESPONSE
+// FORMAT RESPONSE - ENHANCED FOR VISUAL ANALYTICS
 // ============================================================================
 
 async function formatResponse(execution: any): Promise<string> {
@@ -1323,7 +1091,6 @@ async function formatResponse(execution: any): Promise<string> {
     return '❌ No results';
   }
   
-  // Log for debugging CREATE issues
   if (finalResult.operation === 'create') {
     console.log('[FormatResponse] CREATE operation result:', JSON.stringify(finalResult, null, 2));
   }
@@ -1338,11 +1105,23 @@ async function formatResponse(execution: any): Promise<string> {
   const objectType = finalResult.objectType;
   const intent = execution.plan?.intent || '';
   
-  // Get the actual child type if this is a parent-child query
   const finalStep = execution.plan?.steps?.[execution.plan.steps?.length - 1];
   const actualType = finalStep?.childType || objectType;
   
-  // Handle "list all custom objects" - multiple LIST steps
+  // ENHANCED: Detect visual analytics intent
+  const isVisualAnalytics = intent.includes('distribution') || 
+                            intent.includes('breakdown') || 
+                            intent.includes('analysis') ||
+                            intent.includes('visual') ||
+                            intent.includes('analytics') ||
+                            intent.includes('grouped');
+  
+  // ENHANCED: Handle visual analytics queries
+  if (isVisualAnalytics && finalResult.result._results && finalResult.result._results.length > 0) {
+    const displayLabel = await getObjectLabel(actualType);
+    return `📊 **${displayLabel} Analytics** (${count} records)\n\n✨ Chart visualization will render below`;
+  }
+  
   if (intent.includes('list') && intent.includes('custom') && execution.results?.length > 3) {
     let reply = `📋 **Custom Objects in System**\n\n`;
     
@@ -1354,7 +1133,6 @@ async function formatResponse(execution: any): Promise<string> {
       return '❌ No custom objects found';
     }
     
-    // Get display labels for all objects
     const displayPromises = listSteps.map(async (step: any) => {
       const stepType = step.childType || step.objectType;
       const stepCount = step.recordCount || 0;
@@ -1377,7 +1155,6 @@ async function formatResponse(execution: any): Promise<string> {
     return reply;
   }
   
-  // Handle "count all custom objects" - multiple COUNT steps
   if (intent.includes('count') && intent.includes('custom') && execution.results?.length > 3) {
     let reply = `📊 **Custom Objects in System**\n\n`;
     
@@ -1389,7 +1166,6 @@ async function formatResponse(execution: any): Promise<string> {
       return '❌ No custom objects found';
     }
     
-    // Sort by count descending
     countSteps.sort((a: any, b: any) => (b.recordCount || 0) - (a.recordCount || 0));
     
     let totalRecords = 0;
@@ -1398,7 +1174,6 @@ async function formatResponse(execution: any): Promise<string> {
       const stepCount = step.recordCount || 0;
       totalRecords += stepCount;
       
-      // Get display label
       const displayLabel = await getObjectLabel(stepType);
       
       return {
@@ -1421,7 +1196,6 @@ async function formatResponse(execution: any): Promise<string> {
     return reply;
   }
   
-  // Handle CREATE operations
   if (operation === 'create') {
     if (!finalResult.result) {
       return '❌ Create operation failed - no result returned';
@@ -1441,7 +1215,6 @@ async function formatResponse(execution: any): Promise<string> {
     return `✅ **Created ${displayLabel}**\n${details}\nName: ${newName}`;
   }
   
-  // Handle UPDATE operations
   if (operation === 'update') {
     const updatedId = finalResult.result._internalId || finalResult.result.id;
     if (updatedId) {
@@ -1451,7 +1224,6 @@ async function formatResponse(execution: any): Promise<string> {
     }
   }
   
-  // Handle count operations
   if (operation === 'count') {
     return `📊 **Found ${count} ${actualType}**`;
   }
@@ -1460,28 +1232,6 @@ async function formatResponse(execution: any): Promise<string> {
     return `❌ No ${actualType} found`;
   }
   
-  // Handle distribution/grouping intents
-  if (intent.includes('distribution') || intent.includes('by_status') || intent.includes('grouped')) {
-    const items = finalResult.result._results || [];
-    
-    // Group by status
-    const grouped: Record<string, number> = {};
-    items.forEach((item: any) => {
-      const status = item.status?.displayValue || item.status || 'Unknown';
-      grouped[status] = (grouped[status] || 0) + 1;
-    });
-    
-    let reply = `📊 **Task Distribution (${count} total)**\n\n`;
-    Object.entries(grouped)
-      .sort(([, a], [, b]) => b - a)
-      .forEach(([status, taskCount]) => {
-        reply += `• **${status}**: ${taskCount} tasks\n`;
-      });
-    
-    return reply;
-  }
-  
-  // Standard list response
   const displayLabel = await getObjectLabel(actualType);
   let reply = `✅ **Found ${count} ${displayLabel}**\n\n`;
   
@@ -1507,7 +1257,7 @@ async function formatResponse(execution: any): Promise<string> {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.0.0-enhanced-intelligent-describe',
+    version: '4.1.0-visual-analytics',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1522,7 +1272,6 @@ app.get('/api/discover', async (req, res) => {
     const detailed = req.query.detailed === 'true';
     const refresh = req.query.refresh === 'true';
     
-    // Force refresh if requested
     if (refresh) {
       discoveredObjects = null;
       discoveredObjectsTimestamp = 0;
@@ -1530,7 +1279,6 @@ app.get('/api/discover', async (req, res) => {
     }
     
     if (detailed) {
-      // Get detailed information about all objects
       console.log('[API] Fetching detailed object list...');
       
       const customObjectsUrl = '/describe?filter=(isCustom = true) and (isSystem = false)&limit=500';
@@ -1556,7 +1304,6 @@ app.get('/api/discover', async (req, res) => {
         customCount: customObjects._totalCount || 0
       });
     } else {
-      // Just return object names
       const objects = await discoverAllObjects();
       res.json({
         success: true,
@@ -1597,7 +1344,6 @@ app.post('/api/chat', async (req, res) => {
   
   console.log(`\n[Chat] User: "${message}"`);
   
-  // Override config dynamically
   if (clarityBaseUrl) config.baseUrl = clarityBaseUrl;
   if (claritySessionId) {
     config.sessionId = claritySessionId;
@@ -1606,13 +1352,10 @@ app.post('/api/chat', async (req, res) => {
   }
   
   try {
-    // Analyze request with AI
     const plan = await analyzeUserRequest(message);
     
-    // Execute plan
     const execution = await executePlan(plan);
     
-    // Format response
     const reply = await formatResponse(execution);
     
     res.json({
@@ -1639,7 +1382,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Enhanced Intelligent Describe Server v4.0.0');
+  console.log('🚀 Clarity PPM Visual Analytics Server v4.1.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1649,5 +1392,7 @@ app.listen(PORT, () => {
   console.log(`Discover: GET http://localhost:${PORT}/api/discover`);
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
+  console.log('======================================================================');
+  console.log('📊 Visual Analytics Enabled - Ask for distributions, breakdowns, analytics!');
   console.log('======================================================================');
 });
