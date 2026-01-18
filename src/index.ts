@@ -171,38 +171,68 @@ async function describeAttributes(objectName: string): Promise<Map<string, Attri
   const attributeMap = new Map<string, AttributeInfo>();
   
   try {
-    // Try full filter first
-    let url = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true))&limit=1500`;
+    // Use the SAME filter Clarity UI uses - this is critical!
+    // The UI uses: (actionType != 'dataOnly') to get all usable fields
+    const url = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true) and (dataType notIn ('clob','attachment')) and (actionType != 'dataOnly'))&limit=1500&_totalCount=false`;
+    
+    console.log(`[STEP 2] Using Clarity-compatible filter`);
     const result = await makeRequest(url);
     
     if (!result._results || result._results.length === 0) {
-      console.warn(`[STEP 2] No attributes found for ${objectName}`);
-      return attributeMap;
+      // Fallback to simpler filter
+      console.log(`[STEP 2] No results with full filter, trying simple filter...`);
+      const simpleUrl = `/describeAttributes?filter=(resourceName = '${objectName}')&limit=1500`;
+      const simpleResult = await makeRequest(simpleUrl);
+      
+      if (!simpleResult._results || simpleResult._results.length === 0) {
+        console.warn(`[STEP 2] No attributes found for ${objectName}`);
+        return attributeMap;
+      }
+      
+      result._results = simpleResult._results;
     }
     
     const lookupFields: string[] = [];
+    const referenceFields: string[] = [];
     
     for (const attr of result._results) {
       const info: AttributeInfo = {
         apiName: attr.apiName || attr.name,
         displayName: attr.displayName || attr.apiName || attr.name,
         dataType: attr.dataType || 'string',
-        isLookup: attr.dataType === 'lookup',
-        lookupType: attr.lookupType,
-        lookupId: attr.lookupId || attr.lookupAttributeId,
+        // Check for both 'lookup' and 'reference' types
+        isLookup: attr.dataType === 'lookup' || attr.dataType === 'reference' || attr.dataType === 'parameterizedLookup',
+        lookupType: attr.lookupType || attr.referenceType,
+        lookupId: attr.lookupId || attr.lookupAttributeId || attr.referenceObjectId,
         required: attr.required === true,
         isCustom: attr.isCustom === true
       };
       
       attributeMap.set(info.apiName, info);
       
-      if (info.isLookup) {
-        lookupFields.push(`${info.apiName} (${info.lookupType || 'unknown'})`);
+      // Also map by displayName (lowercase) for fuzzy matching
+      attributeMap.set(info.displayName.toLowerCase(), info);
+      
+      if (attr.dataType === 'lookup' || attr.dataType === 'parameterizedLookup') {
+        lookupFields.push(`${info.apiName} (${info.lookupType || 'lookup'})`);
+      }
+      if (attr.dataType === 'reference') {
+        referenceFields.push(`${info.apiName} -> ${info.lookupType || 'unknown'}`);
       }
     }
     
-    console.log(`[STEP 2] ✓ Found ${attributeMap.size} attributes`);
-    console.log(`[STEP 2]   - Lookup fields: ${lookupFields.length > 0 ? lookupFields.join(', ') : 'none'}`);
+    console.log(`[STEP 2] ✓ Found ${result._results.length} attributes`);
+    if (lookupFields.length > 0) {
+      console.log(`[STEP 2]   - Lookup fields: ${lookupFields.slice(0, 10).join(', ')}${lookupFields.length > 10 ? '...' : ''}`);
+    }
+    if (referenceFields.length > 0) {
+      console.log(`[STEP 2]   - Reference fields: ${referenceFields.slice(0, 10).join(', ')}${referenceFields.length > 10 ? '...' : ''}`);
+    }
+    
+    // Debug: List some common fields
+    const commonFields = ['status', 'blueprintId', 'blueprint', 'manager', 'priority', 'category', 'type'];
+    const foundCommon = commonFields.filter(f => attributeMap.has(f));
+    console.log(`[STEP 2]   - Common fields found: ${foundCommon.join(', ') || 'none'}`);
     
     return attributeMap;
     
@@ -287,11 +317,62 @@ async function fetchLookupValues(
   attributeInfo: AttributeInfo
 ): Promise<Map<string, LookupValue>> {
   console.log(`\n[STEP 4] Fetching lookup values for: ${attributeName}`);
+  console.log(`[STEP 4]   - Data type: ${attributeInfo.dataType}`);
+  console.log(`[STEP 4]   - Lookup type: ${attributeInfo.lookupType || 'N/A'}`);
   
   const lookupMap = new Map<string, LookupValue>();
   
   try {
-    // Method 1: Try to get from describeAttributes with lookup values
+    // Method 1: For reference fields (like blueprintId -> investments)
+    if (attributeInfo.dataType === 'reference' || attributeName.endsWith('Id')) {
+      console.log(`[STEP 4] Reference field detected, fetching from referenced object`);
+      
+      // Try to determine the referenced object
+      let refObject = attributeInfo.lookupType;
+      
+      // Common reference mappings
+      const referenceMap: Record<string, string> = {
+        'blueprintId': 'investments',
+        'blueprint': 'investments',
+        'managerId': 'resources',
+        'manager': 'resources',
+        'partition': 'partitions',
+        'partitionId': 'partitions',
+        'primaryOwner': 'resources',
+        'primaryOwnerId': 'resources',
+        'createdBy': 'resources',
+        'updatedBy': 'resources'
+      };
+      
+      if (!refObject && referenceMap[attributeName]) {
+        refObject = referenceMap[attributeName];
+      }
+      
+      if (refObject) {
+        try {
+          console.log(`[STEP 4] Fetching from referenced object: ${refObject}`);
+          const refResult = await makeRequest(`/${refObject}?fields=_internalId,name,code&limit=200`);
+          
+          if (refResult._results) {
+            for (const item of refResult._results) {
+              const lookup: LookupValue = {
+                id: String(item._internalId),
+                code: item.code || item.name || String(item._internalId),
+                displayValue: item.name || item.code || String(item._internalId)
+              };
+              lookupMap.set(lookup.id, lookup);
+              if (item.code) lookupMap.set(item.code, lookup);
+            }
+            console.log(`[STEP 4] ✓ Found ${refResult._results.length} reference values from ${refObject}`);
+            return lookupMap;
+          }
+        } catch (e) {
+          console.log(`[STEP 4] Could not fetch from ${refObject}: ${e}`);
+        }
+      }
+    }
+    
+    // Method 2: Try to get from describeAttributes with lookup values
     const attrUrl = `/describeAttributes?filter=((resourceName = '${objectName}') and (apiName = '${attributeName}'))&limit=1`;
     const attrResult = await makeRequest(attrUrl);
     
@@ -302,28 +383,30 @@ async function fetchLookupValues(
       for (const lv of values) {
         const lookup: LookupValue = {
           id: String(lv.id || lv.code),
-          code: lv.code || lv.id,
+          code: lv.code || String(lv.id),
           displayValue: lv.displayValue || lv.name || lv.code
         };
         lookupMap.set(lookup.id, lookup);
-        lookupMap.set(lookup.code, lookup); // Also map by code
+        lookupMap.set(lookup.code, lookup);
       }
       
       return lookupMap;
     }
     
-    // Method 2: Try specific lookup endpoint based on lookupType
+    // Method 3: Try specific lookup endpoint based on lookupType
     if (attributeInfo.lookupType) {
       const lookupType = attributeInfo.lookupType;
-      console.log(`[STEP 4] Trying lookup type: ${lookupType}`);
+      console.log(`[STEP 4] Trying lookup type endpoint: ${lookupType}`);
       
       // Common lookup endpoints
       const lookupEndpoints: Record<string, string> = {
-        'SRM_TASK_STATUS': '/tasks/taskStatus',
-        'PROJECT_STATUS': '/projects/projectStatus', 
-        'INV_INVESTMENT_STATUS': '/investments/investmentStatus',
-        'PRIORITY': '/lookups/priority',
-        'OBS_UNIT_TYPE': '/lookups/obsUnitType'
+        'SRM_TASK_STATUS': '/lookups/SRM_TASK_STATUS',
+        'PROJECT_STATUS': '/lookups/PROJECT_STATUS',
+        'INV_INVESTMENT_STATUS': '/lookups/INV_INVESTMENT_STATUS',
+        'PRIORITY': '/lookups/PRIORITY',
+        'OBS_UNIT_TYPE': '/lookups/OBS_UNIT_TYPE',
+        'INV_INVESTMENT_TYPE': '/lookups/INV_INVESTMENT_TYPE',
+        'INV_INVESTMENT_STAGE': '/lookups/INV_INVESTMENT_STAGE'
       };
       
       const endpoint = lookupEndpoints[lookupType];
@@ -340,24 +423,43 @@ async function fetchLookupValues(
               lookupMap.set(lookup.id, lookup);
               lookupMap.set(lookup.code, lookup);
             }
-            console.log(`[STEP 4] ✓ Found ${lookupMap.size / 2} lookup values from endpoint`);
+            console.log(`[STEP 4] ✓ Found ${lookupResult._results.length} lookup values from endpoint`);
+            return lookupMap;
           }
         } catch (e) {
           console.log(`[STEP 4] Lookup endpoint ${endpoint} not available`);
         }
       }
+      
+      // Try generic lookup endpoint
+      try {
+        const genericResult = await makeRequest(`/lookups/${lookupType}?limit=100`);
+        if (genericResult._results) {
+          for (const lv of genericResult._results) {
+            const lookup: LookupValue = {
+              id: String(lv._internalId || lv.id || lv.code),
+              code: lv.code || String(lv._internalId),
+              displayValue: lv.name || lv.displayValue || lv.code
+            };
+            lookupMap.set(lookup.id, lookup);
+            if (lv.code) lookupMap.set(lv.code, lookup);
+          }
+          console.log(`[STEP 4] ✓ Found ${genericResult._results.length} lookup values from generic endpoint`);
+          return lookupMap;
+        }
+      } catch (e) {
+        console.log(`[STEP 4] Generic lookup endpoint failed`);
+      }
     }
     
-    // Method 3: Extract unique values from data itself as fallback
-    if (lookupMap.size === 0) {
-      console.log(`[STEP 4] No predefined lookup values found - will extract from data`);
-    }
+    // Method 4: Extract unique values from data itself as fallback
+    console.log(`[STEP 4] No predefined lookup values found - will extract from data`);
     
     return lookupMap;
     
   } catch (error) {
     console.error(`[STEP 4] ✗ Failed to fetch lookup values:`, error);
-    return lookupMap; // Return empty map, we'll extract from data
+    return lookupMap;
   }
 }
 
@@ -494,15 +596,28 @@ For SIMPLE queries (count, list), you can skip metadata steps:
 - fetch_lookups: { "step": "fetch_lookups", "objectName": "projects", "attributeName": "status" }
 - aggregate: { "step": "aggregate", "operation": "distribution", "groupBy": "status" }
 
+**IMPORTANT FIELD NAMING:**
+- Many fields end with "Id" (e.g., "blueprintId" not "blueprint", "managerId" not "manager")
+- When user says "by blueprint" → use "blueprintId"
+- When user says "by manager" → try "manager" first (it exists in projects)
+- When user says "by status" → use "status"
+- When user says "by department" → try "departmentId" or "partition"
+- When user says "by category" → try "category" or "categoryId"
+- Use describe_attributes step to discover actual field names!
+
 **COMMON OBJECTS:**
 - projects, tasks, resources, timesheets, ideas, risks, issues, investments
 - Custom: custTaskUpdates, custWorkPlanBudget, etc.
 
 **COMMON FIELDS FOR DISTRIBUTION:**
 - status (lookup) - Most common for distribution
+- blueprintId (reference) - Project template/blueprint
+- manager (reference) - Project manager
 - percentComplete (number) - Will be grouped into ranges automatically
 - priority (lookup or number)
-- type, category (lookups)
+- partition (reference) - OBS/Department
+- investmentType (lookup) - Project type
+- stage (lookup) - Project stage
 
 **EXAMPLES:**
 
@@ -516,6 +631,18 @@ A: {
     { "step": "aggregate", "operation": "distribution", "groupBy": "status" }
   ],
   "intent": "project_status_distribution"
+}
+
+Q: "Distribute projects by blueprint"
+A: {
+  "steps": [
+    { "step": "describe_object", "objectName": "projects" },
+    { "step": "describe_attributes", "objectName": "projects" },
+    { "step": "fetch_data", "objectName": "projects", "fields": ["_internalId", "name", "blueprintId"], "limit": 500 },
+    { "step": "fetch_lookups", "objectName": "projects", "attributeName": "blueprintId" },
+    { "step": "aggregate", "operation": "distribution", "groupBy": "blueprintId" }
+  ],
+  "intent": "project_blueprint_distribution"
 }
 
 Q: "Show task completion breakdown"
@@ -566,11 +693,12 @@ ${objectsContext}
 
 **RULES:**
 1. For ANY distribution/analytics query → Include describe_object + describe_attributes steps
-2. For status/priority/type fields → Include fetch_lookups step
+2. For lookup/reference fields → Include fetch_lookups step
 3. For percentComplete → Skip fetch_lookups (we group numerically)
 4. Always include _internalId in fields
 5. Use limit: 500 for distributions to get complete picture
 6. For parent-child queries → Use "parentId": "FROM_STEP_X" syntax
+7. When unsure about field name → AI should guess with "Id" suffix (blueprintId, managerId, etc.)
 
 User Query: "${message}"
 
@@ -763,17 +891,89 @@ async function executePlan(plan: any): Promise<any> {
             console.log(`[EXEC] Resolved parentId from step ${stepNum + 1}: ${parentId}`);
           }
           
-          // Validate fields against attributes if available
+          // Smart field resolution - try variations if field not found
           let fields = step.fields || ['_internalId', 'name'];
           if (context.attributes && fields.length > 0) {
-            const validFields = fields.filter((f: string) => 
-              f === '_internalId' || context.attributes!.has(f)
-            );
-            if (validFields.length < fields.length) {
-              const invalid = fields.filter((f: string) => !validFields.includes(f));
-              console.log(`[EXEC] Removed invalid fields: ${invalid.join(', ')}`);
-              fields = validFields.length > 0 ? validFields : ['_internalId', 'name'];
+            const resolvedFields: string[] = [];
+            
+            for (const field of fields) {
+              if (field === '_internalId' || field === 'name') {
+                resolvedFields.push(field);
+                continue;
+              }
+              
+              // Check if field exists directly
+              if (context.attributes.has(field)) {
+                resolvedFields.push(field);
+                continue;
+              }
+              
+              // Try with 'Id' suffix (blueprint -> blueprintId)
+              const fieldWithId = field + 'Id';
+              if (context.attributes.has(fieldWithId)) {
+                console.log(`[EXEC] Field "${field}" not found, using "${fieldWithId}" instead`);
+                resolvedFields.push(fieldWithId);
+                // Update the aggregate step's groupBy field too
+                const aggregateStep = plan.steps.find((s: any) => s.step === 'aggregate');
+                if (aggregateStep && aggregateStep.groupBy === field) {
+                  aggregateStep.groupBy = fieldWithId;
+                  console.log(`[EXEC] Updated aggregate groupBy to "${fieldWithId}"`);
+                }
+                // Update fetch_lookups step too
+                const lookupStep = plan.steps.find((s: any) => s.step === 'fetch_lookups' && s.attributeName === field);
+                if (lookupStep) {
+                  lookupStep.attributeName = fieldWithId;
+                  console.log(`[EXEC] Updated fetch_lookups attributeName to "${fieldWithId}"`);
+                }
+                continue;
+              }
+              
+              // Try without 'Id' suffix (statusId -> status)
+              const fieldWithoutId = field.replace(/Id$/, '');
+              if (fieldWithoutId !== field && context.attributes.has(fieldWithoutId)) {
+                console.log(`[EXEC] Field "${field}" not found, using "${fieldWithoutId}" instead`);
+                resolvedFields.push(fieldWithoutId);
+                continue;
+              }
+              
+              // Try lowercase match
+              const lowerField = field.toLowerCase();
+              for (const [attrName, attrInfo] of context.attributes.entries()) {
+                if (attrInfo.apiName && attrInfo.apiName.toLowerCase() === lowerField) {
+                  console.log(`[EXEC] Field "${field}" not found, using "${attrInfo.apiName}" (case-insensitive match)`);
+                  resolvedFields.push(attrInfo.apiName);
+                  break;
+                }
+              }
+              
+              // If still not found, try to find a field that contains the search term
+              if (!resolvedFields.includes(field)) {
+                for (const [attrName, attrInfo] of context.attributes.entries()) {
+                  if (attrInfo.apiName && attrInfo.apiName.toLowerCase().includes(lowerField)) {
+                    console.log(`[EXEC] Field "${field}" not found, found similar field "${attrInfo.apiName}"`);
+                    resolvedFields.push(attrInfo.apiName);
+                    // Update other steps
+                    const aggregateStep = plan.steps.find((s: any) => s.step === 'aggregate');
+                    if (aggregateStep && aggregateStep.groupBy === field) {
+                      aggregateStep.groupBy = attrInfo.apiName;
+                    }
+                    const lookupStep = plan.steps.find((s: any) => s.step === 'fetch_lookups' && s.attributeName === field);
+                    if (lookupStep) {
+                      lookupStep.attributeName = attrInfo.apiName;
+                    }
+                    break;
+                  }
+                }
+              }
+              
+              // Last resort: log that field was not found
+              if (!resolvedFields.includes(field) && !resolvedFields.some(f => f.toLowerCase().includes(lowerField))) {
+                console.warn(`[EXEC] ⚠ Field "${field}" not found in metadata and no alternative found`);
+              }
             }
+            
+            fields = resolvedFields.length > 0 ? resolvedFields : ['_internalId', 'name'];
+            console.log(`[EXEC] Final fields: ${fields.join(', ')}`);
           }
           
           const records = await fetchData({
