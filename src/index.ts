@@ -171,68 +171,96 @@ async function describeAttributes(objectName: string): Promise<Map<string, Attri
   const attributeMap = new Map<string, AttributeInfo>();
   
   try {
-    // Use the SAME filter Clarity UI uses - this is critical!
-    // The UI uses: (actionType != 'dataOnly') to get all usable fields
-    const url = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true) and (dataType notIn ('clob','attachment')) and (actionType != 'dataOnly'))&limit=1500&_totalCount=false`;
+    // Strategy 1: Use the filter that matches what Clarity UI uses
+    // But without the dataType filter which might exclude some fields
+    let url = `/describeAttributes?filter=((resourceName = '${objectName}') and (honorFieldLevelSecurity = true))&limit=1500&_totalCount=false`;
     
-    console.log(`[STEP 2] Using Clarity-compatible filter`);
-    const result = await makeRequest(url);
+    console.log(`[STEP 2] Fetching with permissive filter...`);
+    let result = await makeRequest(url);
     
     if (!result._results || result._results.length === 0) {
-      // Fallback to simpler filter
-      console.log(`[STEP 2] No results with full filter, trying simple filter...`);
-      const simpleUrl = `/describeAttributes?filter=(resourceName = '${objectName}')&limit=1500`;
-      const simpleResult = await makeRequest(simpleUrl);
-      
-      if (!simpleResult._results || simpleResult._results.length === 0) {
-        console.warn(`[STEP 2] No attributes found for ${objectName}`);
-        return attributeMap;
-      }
-      
-      result._results = simpleResult._results;
+      // Fallback to even simpler filter
+      console.log(`[STEP 2] No results, trying simpler filter...`);
+      url = `/describeAttributes?filter=(resourceName = '${objectName}')&limit=1500`;
+      result = await makeRequest(url);
+    }
+    
+    if (!result._results || result._results.length === 0) {
+      console.warn(`[STEP 2] No attributes found for ${objectName}`);
+      return attributeMap;
     }
     
     const lookupFields: string[] = [];
     const referenceFields: string[] = [];
+    const obsFields: string[] = []; // OBS/partition fields
     
     for (const attr of result._results) {
+      const apiName = attr.apiName || attr.name;
+      if (!apiName) continue;
+      
       const info: AttributeInfo = {
-        apiName: attr.apiName || attr.name,
+        apiName: apiName,
         displayName: attr.displayName || attr.apiName || attr.name,
         dataType: attr.dataType || 'string',
-        // Check for both 'lookup' and 'reference' types
-        isLookup: attr.dataType === 'lookup' || attr.dataType === 'reference' || attr.dataType === 'parameterizedLookup',
-        lookupType: attr.lookupType || attr.referenceType,
-        lookupId: attr.lookupId || attr.lookupAttributeId || attr.referenceObjectId,
+        // Check for lookup, reference, OBS types
+        isLookup: attr.dataType === 'lookup' || 
+                  attr.dataType === 'reference' || 
+                  attr.dataType === 'parameterizedLookup' ||
+                  attr.dataType === 'obs',
+        lookupType: attr.lookupType || attr.referenceType || attr.obsType,
+        lookupId: attr.lookupId || attr.lookupAttributeId || attr.referenceObjectId || attr.obsId,
         required: attr.required === true,
         isCustom: attr.isCustom === true
       };
       
+      // Store by apiName
       attributeMap.set(info.apiName, info);
       
-      // Also map by displayName (lowercase) for fuzzy matching
-      attributeMap.set(info.displayName.toLowerCase(), info);
+      // Also store by lowercase apiName for case-insensitive lookup
+      attributeMap.set(info.apiName.toLowerCase(), info);
       
+      // Track field types for logging
       if (attr.dataType === 'lookup' || attr.dataType === 'parameterizedLookup') {
-        lookupFields.push(`${info.apiName} (${info.lookupType || 'lookup'})`);
+        lookupFields.push(`${info.apiName}`);
       }
       if (attr.dataType === 'reference') {
-        referenceFields.push(`${info.apiName} -> ${info.lookupType || 'unknown'}`);
+        referenceFields.push(`${info.apiName}`);
+      }
+      if (attr.dataType === 'obs' || info.apiName.toLowerCase().includes('partition') || info.apiName.toLowerCase().includes('obs')) {
+        obsFields.push(`${info.apiName} (${attr.dataType})`);
       }
     }
     
     console.log(`[STEP 2] ✓ Found ${result._results.length} attributes`);
+    
     if (lookupFields.length > 0) {
-      console.log(`[STEP 2]   - Lookup fields: ${lookupFields.slice(0, 10).join(', ')}${lookupFields.length > 10 ? '...' : ''}`);
+      console.log(`[STEP 2]   - Lookup fields (${lookupFields.length}): ${lookupFields.slice(0, 8).join(', ')}${lookupFields.length > 8 ? '...' : ''}`);
     }
     if (referenceFields.length > 0) {
-      console.log(`[STEP 2]   - Reference fields: ${referenceFields.slice(0, 10).join(', ')}${referenceFields.length > 10 ? '...' : ''}`);
+      console.log(`[STEP 2]   - Reference fields (${referenceFields.length}): ${referenceFields.slice(0, 8).join(', ')}${referenceFields.length > 8 ? '...' : ''}`);
+    }
+    if (obsFields.length > 0) {
+      console.log(`[STEP 2]   - OBS/Partition fields: ${obsFields.join(', ')}`);
     }
     
-    // Debug: List some common fields
-    const commonFields = ['status', 'blueprintId', 'blueprint', 'manager', 'priority', 'category', 'type'];
-    const foundCommon = commonFields.filter(f => attributeMap.has(f));
-    console.log(`[STEP 2]   - Common fields found: ${foundCommon.join(', ') || 'none'}`);
+    // Debug: List some common fields that might be requested
+    const commonFields = ['status', 'blueprintId', 'blueprint', 'manager', 'priority', 'category', 'type', 
+                         'partition', 'partitionId', 'obsUnit', 'obs', 'department', 'investmentType', 'stage'];
+    const foundCommon = commonFields.filter(f => attributeMap.has(f) || attributeMap.has(f.toLowerCase()));
+    console.log(`[STEP 2]   - Common fields found: ${foundCommon.join(', ') || 'checking...'}`);
+    
+    // Extra debug: Find any field containing 'partition' or 'obs'
+    const partitionLike = Array.from(attributeMap.values())
+      .filter(a => a.apiName && (
+        a.apiName.toLowerCase().includes('partition') || 
+        a.apiName.toLowerCase().includes('obs') ||
+        a.dataType === 'obs'
+      ))
+      .map(a => `${a.apiName} (${a.dataType})`);
+    
+    if (partitionLike.length > 0) {
+      console.log(`[STEP 2]   - Partition/OBS-like fields: ${partitionLike.join(', ')}`);
+    }
     
     return attributeMap;
     
@@ -746,7 +774,7 @@ function fallbackAnalysis(message: string): any {
   const lower = message.toLowerCase().trim();
   
   // Greetings
-  if (/^(hi|hello|hey)[\s!.?]*$/i.test(lower)) {
+  if (/^(hi|hello|hey|שלום|היי)[\s!.?]*$/i.test(lower)) {
     return {
       steps: [],
       message: "Hello! I'm your Clarity AI assistant. Try asking:\n• 'Distribute projects by status'\n• 'Show task completion breakdown'\n• 'How many active projects?'",
@@ -755,48 +783,60 @@ function fallbackAnalysis(message: string): any {
   }
   
   // Distribution queries
-  if (/distribut|breakdown|group.*by|analyz/i.test(lower)) {
-    if (/task/i.test(lower)) {
-      const groupBy = /status/i.test(lower) ? 'status' : 
-                      /complet|percent/i.test(lower) ? 'percentComplete' : 
-                      /priority/i.test(lower) ? 'priority' : 'status';
-      return {
-        steps: [
-          { step: 'describe_object', objectName: 'tasks' },
-          { step: 'describe_attributes', objectName: 'tasks' },
-          { step: 'fetch_data', objectName: 'tasks', fields: ['_internalId', 'name', groupBy], limit: 500 },
-          ...(groupBy !== 'percentComplete' ? [{ step: 'fetch_lookups', objectName: 'tasks', attributeName: groupBy }] : []),
-          { step: 'aggregate', operation: 'distribution', groupBy }
-        ],
-        intent: 'task_distribution'
-      };
+  if (/distribut|breakdown|group.*by|analyz|גרף|התפלגות/i.test(lower)) {
+    // Determine object type
+    let objectType = 'projects';
+    if (/task|משימ/i.test(lower)) objectType = 'tasks';
+    if (/resource|משאב/i.test(lower)) objectType = 'resources';
+    
+    // Determine groupBy field
+    let groupBy = 'status';
+    
+    // For tasks
+    if (objectType === 'tasks') {
+      if (/status|סטטוס/i.test(lower)) groupBy = 'status';
+      else if (/complet|percent|אחוז|השלמה/i.test(lower)) groupBy = 'percentComplete';
+      else if (/priority|עדיפות/i.test(lower)) groupBy = 'priority';
+      else groupBy = 'status'; // Default for tasks
     }
     
-    if (/project/i.test(lower)) {
-      return {
-        steps: [
-          { step: 'describe_object', objectName: 'projects' },
-          { step: 'describe_attributes', objectName: 'projects' },
-          { step: 'fetch_data', objectName: 'projects', fields: ['_internalId', 'name', 'status'], limit: 500 },
-          { step: 'fetch_lookups', objectName: 'projects', attributeName: 'status' },
-          { step: 'aggregate', operation: 'distribution', groupBy: 'status' }
-        ],
-        intent: 'project_distribution'
-      };
+    // For projects
+    if (objectType === 'projects') {
+      if (/status|סטטוס/i.test(lower)) groupBy = 'status';
+      else if (/blueprint|תבנית/i.test(lower)) groupBy = 'blueprintId';
+      else if (/partition|מבנה.*ארגוני|obs|אגף/i.test(lower)) groupBy = 'partition';
+      else if (/manager|מנהל/i.test(lower)) groupBy = 'manager';
+      else if (/type|סוג/i.test(lower)) groupBy = 'investmentType';
+      else if (/stage|שלב/i.test(lower)) groupBy = 'stage';
+      else groupBy = 'status'; // Default for projects
     }
+    
+    // Build steps
+    const needsLookup = groupBy !== 'percentComplete';
+    
+    return {
+      steps: [
+        { step: 'describe_object', objectName: objectType },
+        { step: 'describe_attributes', objectName: objectType },
+        { step: 'fetch_data', objectName: objectType, fields: ['_internalId', 'name', groupBy], limit: 500 },
+        ...(needsLookup ? [{ step: 'fetch_lookups', objectName: objectType, attributeName: groupBy }] : []),
+        { step: 'aggregate', operation: 'distribution', groupBy }
+      ],
+      intent: `${objectType}_${groupBy}_distribution`
+    };
   }
   
   // Count queries
-  if (/how many|count/i.test(lower)) {
-    if (/project/i.test(lower)) {
+  if (/how many|count|כמה/i.test(lower)) {
+    if (/project|פרויקט/i.test(lower)) {
       return {
         steps: [
-          { step: 'fetch_data', objectName: 'projects', filters: /active/i.test(lower) ? { isActive: true } : {}, fields: ['_internalId'], limit: 500 }
+          { step: 'fetch_data', objectName: 'projects', filters: /active|פעיל/i.test(lower) ? { isActive: true } : {}, fields: ['_internalId'], limit: 500 }
         ],
         intent: 'count_projects'
       };
     }
-    if (/task/i.test(lower)) {
+    if (/task|משימ/i.test(lower)) {
       return {
         steps: [
           { step: 'fetch_data', objectName: 'tasks', fields: ['_internalId'], limit: 500 }
@@ -807,7 +847,7 @@ function fallbackAnalysis(message: string): any {
   }
   
   // List custom objects
-  if (/custom.*object|list.*object/i.test(lower)) {
+  if (/custom.*object|list.*object|אובייקט/i.test(lower)) {
     return {
       steps: [{ step: 'describe_custom_objects' }],
       intent: 'list_custom_objects'
@@ -893,8 +933,18 @@ async function executePlan(plan: any): Promise<any> {
           
           // Smart field resolution - try variations if field not found
           let fields = step.fields || ['_internalId', 'name'];
+          const originalFields = [...fields];
+          const fieldsNotFound: string[] = [];
+          
           if (context.attributes && fields.length > 0) {
             const resolvedFields: string[] = [];
+            
+            // Debug: Show some available fields
+            const availableFields = Array.from(context.attributes.values())
+              .filter(a => a.apiName && !a.apiName.startsWith('_'))
+              .map(a => a.apiName)
+              .slice(0, 30);
+            console.log(`[EXEC] Sample available fields: ${availableFields.join(', ')}`);
             
             for (const field of fields) {
               if (field === '_internalId' || field === 'name') {
@@ -936,21 +986,30 @@ async function executePlan(plan: any): Promise<any> {
                 continue;
               }
               
-              // Try lowercase match
+              // Try case-insensitive and partial match
+              let foundMatch = false;
               const lowerField = field.toLowerCase();
+              
               for (const [attrName, attrInfo] of context.attributes.entries()) {
-                if (attrInfo.apiName && attrInfo.apiName.toLowerCase() === lowerField) {
-                  console.log(`[EXEC] Field "${field}" not found, using "${attrInfo.apiName}" (case-insensitive match)`);
+                if (!attrInfo.apiName) continue;
+                
+                // Case-insensitive exact match
+                if (attrInfo.apiName.toLowerCase() === lowerField) {
+                  console.log(`[EXEC] Field "${field}" found as "${attrInfo.apiName}" (case-insensitive)`);
                   resolvedFields.push(attrInfo.apiName);
+                  foundMatch = true;
                   break;
                 }
               }
               
-              // If still not found, try to find a field that contains the search term
-              if (!resolvedFields.includes(field)) {
+              if (!foundMatch) {
+                // Try partial match - field name contains search term
                 for (const [attrName, attrInfo] of context.attributes.entries()) {
-                  if (attrInfo.apiName && attrInfo.apiName.toLowerCase().includes(lowerField)) {
-                    console.log(`[EXEC] Field "${field}" not found, found similar field "${attrInfo.apiName}"`);
+                  if (!attrInfo.apiName) continue;
+                  
+                  if (attrInfo.apiName.toLowerCase().includes(lowerField) || 
+                      lowerField.includes(attrInfo.apiName.toLowerCase())) {
+                    console.log(`[EXEC] Field "${field}" not found, found similar: "${attrInfo.apiName}"`);
                     resolvedFields.push(attrInfo.apiName);
                     // Update other steps
                     const aggregateStep = plan.steps.find((s: any) => s.step === 'aggregate');
@@ -961,29 +1020,56 @@ async function executePlan(plan: any): Promise<any> {
                     if (lookupStep) {
                       lookupStep.attributeName = attrInfo.apiName;
                     }
+                    foundMatch = true;
                     break;
                   }
                 }
               }
               
-              // Last resort: log that field was not found
-              if (!resolvedFields.includes(field) && !resolvedFields.some(f => f.toLowerCase().includes(lowerField))) {
-                console.warn(`[EXEC] ⚠ Field "${field}" not found in metadata and no alternative found`);
+              // If still not found, add to not found list but TRY ANYWAY
+              // Some fields might be accessible but not in describeAttributes
+              if (!foundMatch) {
+                console.warn(`[EXEC] ⚠ Field "${field}" not found in metadata - will try anyway`);
+                fieldsNotFound.push(field);
+                resolvedFields.push(field); // Try it anyway!
               }
             }
             
             fields = resolvedFields.length > 0 ? resolvedFields : ['_internalId', 'name'];
-            console.log(`[EXEC] Final fields: ${fields.join(', ')}`);
           }
           
-          const records = await fetchData({
-            objectName: step.objectName,
-            parentId: parentId,
-            childType: step.childType,
-            fields: fields,
-            filters: step.filters,
-            limit: step.limit || 500
-          });
+          console.log(`[EXEC] Final fields: ${fields.join(', ')}`);
+          
+          // Try to fetch with all fields first
+          let records: any[] = [];
+          try {
+            records = await fetchData({
+              objectName: step.objectName,
+              parentId: parentId,
+              childType: step.childType,
+              fields: fields,
+              filters: step.filters,
+              limit: step.limit || 500
+            });
+          } catch (fetchError) {
+            // If fetch fails with certain fields, try without the problematic ones
+            if (fieldsNotFound.length > 0) {
+              console.log(`[EXEC] Fetch failed, retrying without unverified fields: ${fieldsNotFound.join(', ')}`);
+              const safeFields = fields.filter(f => !fieldsNotFound.includes(f));
+              if (safeFields.length === 0) safeFields.push('_internalId', 'name');
+              
+              records = await fetchData({
+                objectName: step.objectName,
+                parentId: parentId,
+                childType: step.childType,
+                fields: safeFields,
+                filters: step.filters,
+                limit: step.limit || 500
+              });
+            } else {
+              throw fetchError;
+            }
+          }
           
           context.data = records;
           context.stepResults.push({ step: step.step, success: true, count: records.length, data: records });
