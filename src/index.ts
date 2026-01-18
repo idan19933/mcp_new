@@ -685,12 +685,20 @@ async function analyzeUserRequest(message: string): Promise<any> {
 
   let systemPrompt = `You are a Clarity PPM API expert that uses intelligent metadata discovery and creates visual analytics.
 
+**IMPORTANT - HANDLE GREETINGS:**
+If the user says ONLY a greeting like "hi", "hello", "hey" with NO other question, respond with:
+{
+  "steps": [],
+  "intent": "greeting"
+}
+
 **YOUR PROCESS:**
 1. Analyze the user's natural language request
-2. Identify the Clarity objects involved (projects, tasks, resources, etc.)
-3. Determine what operation is needed (count, list, get, create, update)
-4. Extract any filters or conditions
-5. Return a structured execution plan
+2. If it's JUST a greeting → return empty steps with "greeting" intent
+3. Identify the Clarity objects involved (projects, tasks, resources, etc.)
+4. Determine what operation is needed (count, list, get, create, update)
+5. Extract any filters or conditions
+6. Return a structured execution plan
 
 **VISUAL ANALYTICS:**
 When users ask for distributions, analytics, breakdowns, or groupings:
