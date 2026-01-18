@@ -1,8 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.1.0 - Visual Analytics Edition
+ * Clarity PPM HTTP Server v4.2.0 - Visual Analytics Edition (FIXED)
  * - Enhanced with distribution and analytics support
  * - Automatic chart data preparation
  * - Smart grouping for visualizations
+ * - FIXED: Null checks in formatResponse
  */
 
 import express, { Request, Response } from 'express';
@@ -839,6 +840,19 @@ A: {
   "intent": "custom_object_distribution_visual"
 }
 
+Q: "Create me distribution of tasks in system"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "tasks",
+      "fields": ["name", "status", "percentComplete", "priority", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "task_distribution_visual"
+}
+
 Q: "List tasks for project 5003001"
 A: {
   "steps": [
@@ -982,7 +996,7 @@ function fallbackAnalysis(message: string): any {
   const lower = message.toLowerCase().trim();
   
   // Handle greetings
-  if (/^(hi|hello|hey|greetings|good morning|good afternoon|good evening)$/i.test(lower)) {
+  if (/^(hi|hello|hey|greetings|good morning|good afternoon|good evening)[\s!.?]*$/i.test(lower)) {
     return {
       steps: [],
       message: "Hello! I'm your Clarity AI assistant. I can help you with:\n\n• View projects, tasks, and custom objects\n• Create visual analytics and distributions\n• Count records and generate reports\n• Create and update data\n\nTry asking: 'Show task distribution for project Alpha' or 'How many active projects?'",
@@ -1040,10 +1054,13 @@ function fallbackAnalysis(message: string): any {
 // ============================================================================
 
 async function executePlan(plan: any): Promise<any> {
+  // FIXED: Handle greeting and empty steps gracefully
   if (!plan.steps || !Array.isArray(plan.steps) || plan.steps.length === 0) {
     return {
-      success: false,
-      message: plan.message || "No steps to execute"
+      success: true, // Changed to true for greetings
+      message: plan.message || "Hello! How can I help you with Clarity PPM today?",
+      results: [],
+      plan
     };
   }
 
@@ -1093,10 +1110,16 @@ async function executePlan(plan: any): Promise<any> {
 }
 
 // ============================================================================
-// FORMAT RESPONSE - ENHANCED FOR VISUAL ANALYTICS
+// FORMAT RESPONSE - ENHANCED FOR VISUAL ANALYTICS (FIXED NULL CHECKS)
 // ============================================================================
 
 async function formatResponse(execution: any): Promise<string> {
+  // FIXED: Handle greeting responses
+  if (execution.plan?.intent === 'greeting' || 
+      (!execution.results || execution.results.length === 0)) {
+    return execution.message || "Hello! I'm your Clarity AI assistant. How can I help you today?";
+  }
+  
   if (!execution.success) {
     return `❌ ${execution.message || 'Execution failed'}`;
   }
@@ -1122,7 +1145,11 @@ async function formatResponse(execution: any): Promise<string> {
   const objectType = finalResult.objectType;
   const intent = execution.plan?.intent || '';
   
-  const finalStep = execution.plan?.steps?.[execution.plan.steps?.length - 1];
+  // FIXED: Safe access to steps array
+  const steps = execution.plan?.steps;
+  const finalStep = (steps && Array.isArray(steps) && steps.length > 0) 
+    ? steps[steps.length - 1] 
+    : null;
   const actualType = finalStep?.childType || objectType;
   
   // ENHANCED: Detect visual analytics intent
@@ -1274,7 +1301,7 @@ async function formatResponse(execution: any): Promise<string> {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.1.0-visual-analytics',
+    version: '4.2.0-visual-analytics-fixed',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1375,10 +1402,15 @@ app.post('/api/chat', async (req, res) => {
     
     const reply = await formatResponse(execution);
     
+    // FIXED: Safe access to results
+    const lastResult = (execution.results && execution.results.length > 0)
+      ? execution.results[execution.results.length - 1]?.result
+      : null;
+    
     res.json({
       success: true,
       reply,
-      data: execution.results[execution.results.length - 1]?.result,
+      data: lastResult,
       _debug: { plan, execution },
       timestamp: new Date().toISOString()
     });
@@ -1399,7 +1431,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Visual Analytics Server v4.1.0');
+  console.log('🚀 Clarity PPM Visual Analytics Server v4.2.0 (FIXED)');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
