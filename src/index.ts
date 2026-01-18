@@ -1,8 +1,8 @@
 /**
- * Clarity PPM HTTP Server v4.2.0 - Visual Analytics Edition (FIXED)
- * - Enhanced with distribution and analytics support
- * - Automatic chart data preparation
- * - Smart grouping for visualizations
+ * Clarity PPM HTTP Server v4.3.0 - Lookup Visualization Edition
+ * - Enhanced with lookup field detection and resolution
+ * - Automatic chart data preparation with proper labels
+ * - Smart grouping for lookup-based visualizations
  * - FIXED: Null checks in formatResponse
  */
 
@@ -30,6 +30,55 @@ const config: ClarityConfig = {
   sessionId: process.env.CLARITY_SESSION_ID,
   authToken: process.env.CLARITY_AUTH_TOKEN,
 };
+
+// ============================================================================
+// LOOKUP VALUE CACHE
+// ============================================================================
+
+interface LookupValue {
+  code: string;
+  displayValue: string;
+}
+
+const lookupValuesCache = new Map<string, LookupValue[]>();
+const LOOKUP_CACHE_TTL = 1000 * 60 * 30; // 30 minutes
+const lookupCacheTimestamps = new Map<string, number>();
+
+async function getLookupValues(lookupCode: string, forceRefresh: boolean = false): Promise<LookupValue[]> {
+  const cacheKey = lookupCode.toLowerCase();
+  const now = Date.now();
+  
+  if (!forceRefresh && lookupValuesCache.has(cacheKey)) {
+    const timestamp = lookupCacheTimestamps.get(cacheKey) || 0;
+    if (now - timestamp < LOOKUP_CACHE_TTL) {
+      console.log(`[LookupCache] Using cached values for ${lookupCode}`);
+      return lookupValuesCache.get(cacheKey)!;
+    }
+  }
+  
+  try {
+    console.log(`[LookupCache] Fetching lookup values for ${lookupCode}...`);
+    
+    const result = await makeRequest(
+      `/lookupValues?filter=(lookupCode = '${lookupCode}')&limit=500`
+    );
+    
+    const values: LookupValue[] = (result._results || []).map((item: any) => ({
+      code: item.code || item.value || '',
+      displayValue: item.displayValue || item.label || item.name || item.code || ''
+    }));
+    
+    lookupValuesCache.set(cacheKey, values);
+    lookupCacheTimestamps.set(cacheKey, now);
+    
+    console.log(`[LookupCache] Cached ${values.length} values for ${lookupCode}`);
+    return values;
+    
+  } catch (error) {
+    console.error(`[LookupCache] Failed to fetch lookup values for ${lookupCode}:`, error);
+    return [];
+  }
+}
 
 // ============================================================================
 // MIDDLEWARE
@@ -111,6 +160,7 @@ interface AttributeMetadata {
   required: boolean;
   isLookup: boolean;
   lookupType?: string;
+  lookupCode?: string;
   lookupValues?: Array<{ code: string; displayValue: string }>;
   maxLength?: number;
   isCustom: boolean;
@@ -363,6 +413,7 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
       required: attr.required === true,
       isLookup: attr.dataType === 'lookup',
       lookupType: attr.lookupType,
+      lookupCode: attr.lookupCode,
       lookupValues: attr.lookupValues || attr.validValues || [],
       maxLength: attr.maxLength,
       isCustom: attr.isCustom === true,
@@ -417,6 +468,125 @@ function getSmartFieldSelection(metadata: ObjectMetadata, maxFields: number = 15
     .slice(0, maxFields);
   
   return filteredAttributes.map(attr => attr.apiName);
+}
+
+// ============================================================================
+// VISUALIZATION DATA PREPARATION
+// ============================================================================
+
+interface ChartDataPoint {
+  label: string;
+  value: number;
+  originalCode?: string;
+}
+
+async function prepareVisualizationData(
+  data: any[],
+  metadata: ObjectMetadata
+): Promise<{ groupableFields: string[]; chartData: Record<string, ChartDataPoint[]> }> {
+  
+  console.log('[Visualization] Preparing chart data...');
+  
+  // Identify groupable fields (lookup, status, priority, etc.)
+  const groupableFields: string[] = [];
+  const lookupFieldsMap = new Map<string, AttributeMetadata>();
+  
+  for (const attr of metadata.attributes) {
+    if (attr.isLookup && attr.lookupCode) {
+      groupableFields.push(attr.apiName);
+      lookupFieldsMap.set(attr.apiName, attr);
+      console.log(`[Visualization] Found lookup field: ${attr.apiName} (${attr.lookupCode})`);
+    }
+  }
+  
+  // Also check for common groupable fields
+  const commonGroupableFields = ['status', 'priority', 'percentComplete', 'type', 'category'];
+  for (const field of commonGroupableFields) {
+    const attr = metadata.attributes.find(a => a.apiName === field);
+    if (attr && !groupableFields.includes(field)) {
+      groupableFields.push(field);
+      if (attr.isLookup && attr.lookupCode) {
+        lookupFieldsMap.set(field, attr);
+      }
+    }
+  }
+  
+  console.log(`[Visualization] Groupable fields: ${groupableFields.join(', ')}`);
+  
+  // Prepare chart data for each groupable field
+  const chartData: Record<string, ChartDataPoint[]> = {};
+  
+  for (const fieldName of groupableFields) {
+    const fieldData = new Map<string, number>();
+    const lookupAttr = lookupFieldsMap.get(fieldName);
+    
+    // Count occurrences
+    for (const record of data) {
+      const value = record[fieldName];
+      if (value === null || value === undefined) continue;
+      
+      let key: string;
+      if (typeof value === 'object' && value.code !== undefined) {
+        key = String(value.code);
+      } else {
+        key = String(value);
+      }
+      
+      fieldData.set(key, (fieldData.get(key) || 0) + 1);
+    }
+    
+    // Resolve lookup values if this is a lookup field
+    const chartPoints: ChartDataPoint[] = [];
+    
+    if (lookupAttr && lookupAttr.lookupCode) {
+      console.log(`[Visualization] Fetching lookup values for ${fieldName} (${lookupAttr.lookupCode})`);
+      
+      // Try to get from embedded metadata first
+      let lookupValues: LookupValue[] = [];
+      if (lookupAttr.lookupValues && lookupAttr.lookupValues.length > 0) {
+        lookupValues = lookupAttr.lookupValues;
+        console.log(`[Visualization] Using embedded lookup values: ${lookupValues.length} values`);
+      } else {
+        // Fetch from API
+        lookupValues = await getLookupValues(lookupAttr.lookupCode);
+      }
+      
+      // Create lookup map
+      const lookupMap = new Map<string, string>();
+      for (const lv of lookupValues) {
+        lookupMap.set(String(lv.code), lv.displayValue);
+      }
+      
+      // Build chart points with resolved labels
+      for (const [code, count] of fieldData.entries()) {
+        const label = lookupMap.get(code) || code;
+        chartPoints.push({
+          label,
+          value: count,
+          originalCode: code
+        });
+      }
+      
+      console.log(`[Visualization] Resolved ${chartPoints.length} labels for ${fieldName}`);
+      
+    } else {
+      // Non-lookup field - use values as-is
+      for (const [key, count] of fieldData.entries()) {
+        chartPoints.push({
+          label: key,
+          value: count
+        });
+      }
+    }
+    
+    // Sort by value descending
+    chartPoints.sort((a, b) => b.value - a.value);
+    
+    chartData[fieldName] = chartPoints;
+    console.log(`[Visualization] ${fieldName}: ${chartPoints.length} categories`);
+  }
+  
+  return { groupableFields, chartData };
 }
 
 // ============================================================================
@@ -1057,7 +1227,7 @@ async function executePlan(plan: any): Promise<any> {
   // FIXED: Handle greeting and empty steps gracefully
   if (!plan.steps || !Array.isArray(plan.steps) || plan.steps.length === 0) {
     return {
-      success: true, // Changed to true for greetings
+      success: true,
       message: plan.message || "Hello! How can I help you with Clarity PPM today?",
       results: [],
       plan
@@ -1087,6 +1257,7 @@ async function executePlan(plan: any): Promise<any> {
         objectType: step.objectType,
         childType: step.childType,
         result,
+        metadata,
         recordCount: result._totalCount || result._results?.length || (result._internalId ? 1 : 0)
       });
       
@@ -1110,25 +1281,34 @@ async function executePlan(plan: any): Promise<any> {
 }
 
 // ============================================================================
-// FORMAT RESPONSE - ENHANCED FOR VISUAL ANALYTICS (FIXED NULL CHECKS)
+// FORMAT RESPONSE - ENHANCED FOR VISUAL ANALYTICS WITH LOOKUP SUPPORT
 // ============================================================================
 
-async function formatResponse(execution: any): Promise<string> {
+async function formatResponse(execution: any): Promise<any> {
   // FIXED: Handle greeting responses
   if (execution.plan?.intent === 'greeting' || 
       (!execution.results || execution.results.length === 0)) {
-    return execution.message || "Hello! I'm your Clarity AI assistant. How can I help you today?";
+    return {
+      reply: execution.message || "Hello! I'm your Clarity AI assistant. How can I help you today?",
+      chartData: null
+    };
   }
   
   if (!execution.success) {
-    return `❌ ${execution.message || 'Execution failed'}`;
+    return {
+      reply: `❌ ${execution.message || 'Execution failed'}`,
+      chartData: null
+    };
   }
   
   const finalResult = execution.results[execution.results.length - 1];
   
   if (!finalResult) {
     console.error('[FormatResponse] No finalResult in execution.results');
-    return '❌ No results';
+    return {
+      reply: '❌ No results',
+      chartData: null
+    };
   }
   
   if (finalResult.operation === 'create') {
@@ -1137,7 +1317,10 @@ async function formatResponse(execution: any): Promise<string> {
   
   if (!finalResult.result) {
     console.error('[FormatResponse] No result in finalResult:', JSON.stringify(finalResult, null, 2));
-    return '❌ No results';
+    return {
+      reply: '❌ No results',
+      chartData: null
+    };
   }
   
   const count = finalResult.recordCount || 0;
@@ -1145,7 +1328,6 @@ async function formatResponse(execution: any): Promise<string> {
   const objectType = finalResult.objectType;
   const intent = execution.plan?.intent || '';
   
-  // FIXED: Safe access to steps array
   const steps = execution.plan?.steps;
   const finalStep = (steps && Array.isArray(steps) && steps.length > 0) 
     ? steps[steps.length - 1] 
@@ -1160,10 +1342,20 @@ async function formatResponse(execution: any): Promise<string> {
                             intent.includes('analytics') ||
                             intent.includes('grouped');
   
-  // ENHANCED: Handle visual analytics queries
-  if (isVisualAnalytics && finalResult.result._results && finalResult.result._results.length > 0) {
+  // ENHANCED: Handle visual analytics queries with lookup resolution
+  if (isVisualAnalytics && finalResult.result._results && finalResult.result._results.length > 0 && finalResult.metadata) {
     const displayLabel = await getObjectLabel(actualType);
-    return `📊 **${displayLabel} Analytics** (${count} records)\n\n✨ Chart visualization will render below`;
+    
+    // Prepare visualization data with lookup resolution
+    const vizData = await prepareVisualizationData(
+      finalResult.result._results,
+      finalResult.metadata
+    );
+    
+    return {
+      reply: `📊 **${displayLabel} Analytics** (${count} records)\n\n✨ Chart visualizations below`,
+      chartData: vizData
+    };
   }
   
   if (intent.includes('list') && intent.includes('custom') && execution.results?.length > 3) {
@@ -1174,7 +1366,10 @@ async function formatResponse(execution: any): Promise<string> {
     );
     
     if (listSteps.length === 0) {
-      return '❌ No custom objects found';
+      return {
+        reply: '❌ No custom objects found',
+        chartData: null
+      };
     }
     
     const displayPromises = listSteps.map(async (step: any) => {
@@ -1196,7 +1391,10 @@ async function formatResponse(execution: any): Promise<string> {
     });
     
     reply += `\n_Total: ${listSteps.length} custom objects with data_`;
-    return reply;
+    return {
+      reply,
+      chartData: null
+    };
   }
   
   if (intent.includes('count') && intent.includes('custom') && execution.results?.length > 3) {
@@ -1207,7 +1405,10 @@ async function formatResponse(execution: any): Promise<string> {
     );
     
     if (countSteps.length === 0) {
-      return '❌ No custom objects found';
+      return {
+        reply: '❌ No custom objects found',
+        chartData: null
+      };
     }
     
     countSteps.sort((a: any, b: any) => (b.recordCount || 0) - (a.recordCount || 0));
@@ -1237,12 +1438,18 @@ async function formatResponse(execution: any): Promise<string> {
     
     const objectsWithData = countSteps.filter((s: any) => s.recordCount > 0).length;
     reply += `\n_Found ${objectsWithData} custom objects with ${totalRecords} total records_`;
-    return reply;
+    return {
+      reply,
+      chartData: null
+    };
   }
   
   if (operation === 'create') {
     if (!finalResult.result) {
-      return '❌ Create operation failed - no result returned';
+      return {
+        reply: '❌ Create operation failed - no result returned',
+        chartData: null
+      };
     }
     
     const newId = finalResult.result._internalId || finalResult.result.code;
@@ -1256,24 +1463,39 @@ async function formatResponse(execution: any): Promise<string> {
     }
     details += ')';
     
-    return `✅ **Created ${displayLabel}**\n${details}\nName: ${newName}`;
+    return {
+      reply: `✅ **Created ${displayLabel}**\n${details}\nName: ${newName}`,
+      chartData: null
+    };
   }
   
   if (operation === 'update') {
     const updatedId = finalResult.result._internalId || finalResult.result.id;
     if (updatedId) {
-      return `✅ **Updated ${actualType}** (ID: ${updatedId})`;
+      return {
+        reply: `✅ **Updated ${actualType}** (ID: ${updatedId})`,
+        chartData: null
+      };
     } else {
-      return `✅ **Updated ${actualType}**`;
+      return {
+        reply: `✅ **Updated ${actualType}**`,
+        chartData: null
+      };
     }
   }
   
   if (operation === 'count') {
-    return `📊 **Found ${count} ${actualType}**`;
+    return {
+      reply: `📊 **Found ${count} ${actualType}**`,
+      chartData: null
+    };
   }
   
   if (count === 0) {
-    return `❌ No ${actualType} found`;
+    return {
+      reply: `❌ No ${actualType} found`,
+      chartData: null
+    };
   }
   
   const displayLabel = await getObjectLabel(actualType);
@@ -1291,7 +1513,10 @@ async function formatResponse(execution: any): Promise<string> {
     reply += items + more;
   }
   
-  return reply;
+  return {
+    reply,
+    chartData: null
+  };
 }
 
 // ============================================================================
@@ -1301,12 +1526,13 @@ async function formatResponse(execution: any): Promise<string> {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.2.0-visual-analytics-fixed',
+    version: '4.3.0-lookup-visualization',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
       hasAI: !!process.env.ANTHROPIC_API_KEY,
-      cacheSize: metadataCache.size
+      cacheSize: metadataCache.size,
+      lookupCacheSize: lookupValuesCache.size
     }
   });
 });
@@ -1400,16 +1626,16 @@ app.post('/api/chat', async (req, res) => {
     
     const execution = await executePlan(plan);
     
-    const reply = await formatResponse(execution);
+    const response = await formatResponse(execution);
     
-    // FIXED: Safe access to results
     const lastResult = (execution.results && execution.results.length > 0)
       ? execution.results[execution.results.length - 1]?.result
       : null;
     
     res.json({
       success: true,
-      reply,
+      reply: response.reply,
+      chartData: response.chartData,
       data: lastResult,
       _debug: { plan, execution },
       timestamp: new Date().toISOString()
@@ -1431,7 +1657,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Visual Analytics Server v4.2.0 (FIXED)');
+  console.log('🚀 Clarity PPM Lookup Visualization Server v4.3.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1442,6 +1668,7 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('📊 Visual Analytics Enabled - Ask for distributions, breakdowns, analytics!');
+  console.log('📊 Lookup Field Visualization Enabled!');
+  console.log('✨ Automatically resolves lookup codes to display values for charts');
   console.log('======================================================================');
 });
