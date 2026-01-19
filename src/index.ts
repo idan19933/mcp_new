@@ -1,10 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.8.0 - Process Only Data Fields
- * - CRITICAL FIX: Only processes fields present in API response
- * - No longer iterates through all 268 metadata fields
- * - Massive performance improvement
- * - Works with Hebrew field names
- * - All lookup fields are groupable
+ * Clarity PPM HTTP Server v4.9.0 - Hebrew Field Support
+ * - Removed strict field validation - tries all fields
+ * - AI gets list of available fields with Hebrew names
+ * - Can match Hebrew field names to API names
+ * - Better handling of fields not in metadata
  */
 
 import express, { Request, Response } from 'express';
@@ -1026,24 +1025,18 @@ async function buildIntelligentQuery(intent: QueryIntent, previousResults?: any[
     query.fields = '_internalId';
     query.limit = 500;
   } else if (intent.fields && intent.fields.length > 0) {
-    const validFields = intent.fields.filter(field => {
+    // Don't filter out fields - let Clarity API reject them if invalid
+    // This allows fields that exist but aren't in metadata (e.g., actionType='dataOnly')
+    query.fields = intent.fields.join(',');
+    
+    // Just warn about fields not in metadata
+    const unknownFields = intent.fields.filter(field => {
       const attr = metadata.attributes.find(a => a.apiName === field);
-      if (!attr && field !== '_internalId') {
-        console.warn(`[FieldValidation] Field '${field}' not found in metadata, excluding`);
-        return false;
-      }
-      return true;
+      return !attr && field !== '_internalId';
     });
     
-    if (validFields.length === 0) {
-      const smartFields = getSmartFieldSelection(metadata);
-      query.fields = smartFields.join(',');
-      console.log(`[FieldValidation] No valid fields requested, using smart selection`);
-    } else {
-      query.fields = validFields.join(',');
-      if (validFields.length < intent.fields.length) {
-        console.log(`[FieldValidation] Filtered fields: ${validFields.join(',')} (removed invalid fields)`);
-      }
+    if (unknownFields.length > 0) {
+      console.log(`[FieldValidation] Fields not in metadata (will try anyway): ${unknownFields.join(', ')}`);
     }
   } else if (intent.operation === 'list' || intent.operation === 'get') {
     const smartFields = getSmartFieldSelection(metadata);
@@ -1098,6 +1091,14 @@ When the user asks for a SPECIFIC field (e.g., "show name distribution", "graph 
 1. Include ONLY that specific field + _internalId in the fields list
 2. Do NOT add other fields unless the user explicitly asks for them
 3. The field the user requests is THE ONLY ONE that matters
+4. If user provides field name in Hebrew or other language, look for it in the available objects list below
+
+**IMPORTANT - USE EXACT FIELD NAMES:**
+When user specifies a field name (especially in Hebrew, Arabic, or other non-English languages):
+- Look for the EXACT field name in the available objects/fields list provided below
+- Use the apiName exactly as shown in the metadata
+- Do NOT translate or guess the field name
+- Example: "אגף אחראי" → look for this exact Hebrew text in the field list → use "p_z_responsible_depart"
 
 **IMPORTANT - HANDLE GREETINGS:**
 If the user says ONLY a greeting like "hi", "hello", "hey" with NO other question, respond with:
@@ -1319,6 +1320,23 @@ Respond ONLY with the JSON execution plan. No explanations.`;
       systemPrompt += availableObjectsHint;
     } else {
       console.log('[AI] No custom objects found');
+    }
+    
+    // Add available fields for "projects" if query mentions it
+    if (message.toLowerCase().includes('project')) {
+      try {
+        const projectMetadata = await getObjectMetadata('projects');
+        const groupableFields = projectMetadata.attributes
+          .filter(attr => attr.isGroupable !== false && attr.dataType !== 'clob')
+          .slice(0, 50)  // Limit to first 50 fields
+          .map(attr => `${attr.apiName} (${attr.displayName})`)
+          .join(', ');
+        
+        systemPrompt += `\n\nAVAILABLE PROJECT FIELDS:\n${groupableFields}\n`;
+        console.log('[AI] Added available project fields to context');
+      } catch (error) {
+        console.warn('[AI] Could not fetch project fields:', error);
+      }
     }
   } catch (error) {
     console.warn('[AI] Could not fetch available objects for context:', error);
@@ -1820,7 +1838,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.8.0-process-only-data-fields',
+    version: '4.9.0-hebrew-field-support',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1951,7 +1969,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Process Only Data Fields v4.8.0');
+  console.log('🚀 Clarity PPM Hebrew Field Support v4.9.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1962,9 +1980,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('⚡ CRITICAL FIX: Only processes fields in data!');
-  console.log('🎯 No more "no data in records" spam');
-  console.log('🌍 Works with Hebrew field names');
-  console.log('📊 All lookup fields groupable');
+  console.log('🌍 Hebrew/Unicode field names supported!');
+  console.log('🎯 AI sees available fields with display names');
+  console.log('✅ No strict field validation');
+  console.log('📊 Works with any groupable field');
   console.log('======================================================================');
 });
