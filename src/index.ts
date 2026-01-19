@@ -1,9 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.5.3 - Super Verbose Manager Debugging
- * - Added extensive logging specifically for manager field
- * - Shows sample data from multiple records
- * - Explicit markers when manager field is included/skipped
- * - Logs reason for skipping if it happens
+ * Clarity PPM HTTP Server v4.6.0 - Process Data Fields Edition
+ * - MAJOR FIX: Processes fields from actual API data, not just metadata
+ * - Handles fields filtered out by describeAttributes (like manager)
+ * - Auto-detects field types from data when metadata unavailable
+ * - Works with ANY groupable field in the response
  */
 
 import express, { Request, Response } from 'express';
@@ -495,7 +495,7 @@ interface VisualizationResult {
 async function prepareVisualizationData(
   data: any[],
   metadata: ObjectMetadata,
-  requestedFields?: string[]  // NEW: Fields explicitly requested by user
+  requestedFields?: string[]
 ): Promise<VisualizationResult> {
   
   console.log('[Visualization] Preparing comprehensive chart data...');
@@ -505,13 +505,78 @@ async function prepareVisualizationData(
     console.log(`[Visualization] User requested specific fields: ${requestedFields.join(', ')}`);
   }
   
+  // DEBUG: Show actual fields in the data
+  if (data.length > 0) {
+    const dataFields = Object.keys(data[0]);
+    console.log(`[Visualization] 📊 Fields present in DATA: ${dataFields.join(', ')}`);
+  }
+  
+  // DEBUG: Show fields in metadata
+  const metadataFields = metadata.attributes.map(a => a.apiName);
+  console.log(`[Visualization] 📋 Fields in METADATA (first 20): ${metadataFields.slice(0, 20).join(', ')}...`);
+  
+  // DEBUG: Check if requested fields are in metadata
+  if (requestedFields && requestedFields.length > 0) {
+    requestedFields.forEach(rf => {
+      const foundInMetadata = metadataFields.some(mf => mf.toLowerCase().includes(rf.toLowerCase()));
+      const foundInData = data.length > 0 && Object.keys(data[0]).some(df => df.toLowerCase().includes(rf.toLowerCase()));
+      console.log(`[Visualization] 🔍 Field "${rf}": in metadata=${foundInMetadata}, in data=${foundInData}`);
+    });
+  }
+  
   const chartData: Record<string, ChartDataPoint[]> = {};
   const groupableFields: string[] = [];
   const fieldMetadata: Record<string, any> = {};
   
-  // Process each attribute to find groupable fields
+  // BUILD A COMBINED LIST: Fields from metadata + Fields from actual data
+  const fieldsToProcess = new Map<string, AttributeMetadata>();
+  
+  // Add all metadata fields
   for (const attr of metadata.attributes) {
-    const fieldName = attr.apiName;
+    fieldsToProcess.set(attr.apiName, attr);
+  }
+  
+  // Add fields from actual data that aren't in metadata
+  if (data.length > 0) {
+    const dataFieldNames = Object.keys(data[0]);
+    for (const fieldName of dataFieldNames) {
+      if (!fieldsToProcess.has(fieldName)) {
+        // Create a minimal attribute metadata for this field
+        const sampleValue = data[0][fieldName];
+        let dataType = 'string';
+        
+        if (sampleValue && typeof sampleValue === 'object' && sampleValue._type === 'lookup') {
+          dataType = 'lookup';
+        } else if (typeof sampleValue === 'number') {
+          dataType = 'number';
+        } else if (typeof sampleValue === 'boolean') {
+          dataType = 'boolean';
+        }
+        
+        console.log(`[Visualization] 💡 Found field "${fieldName}" in DATA but not in METADATA - adding it (type: ${dataType})`);
+        
+        fieldsToProcess.set(fieldName, {
+          apiName: fieldName,
+          dataType: dataType,
+          displayName: fieldName,
+          required: false,
+          isLookup: dataType === 'lookup',
+          lookupType: undefined,
+          lookupCode: undefined,
+          lookupValues: [],
+          maxLength: undefined,
+          isCustom: false,
+          actionType: undefined,
+          extendedType: undefined
+        });
+      }
+    }
+  }
+  
+  console.log(`[Visualization] 🎯 Total fields to process: ${fieldsToProcess.size} (${metadata.attributes.length} from metadata + ${fieldsToProcess.size - metadata.attributes.length} from data)`);
+  
+  // Process each field
+  for (const [fieldName, attr] of fieldsToProcess.entries()) {
     
     // SPECIAL DEBUG: Log manager field details
     if (fieldName === 'manager' || fieldName.toLowerCase().includes('manager')) {
@@ -1750,7 +1815,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.5.3-super-verbose-debug',
+    version: '4.6.0-process-data-fields',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1881,7 +1946,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Super Verbose Debug Server v4.5.3');
+  console.log('🚀 Clarity PPM Process Data Fields Server v4.6.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1892,9 +1957,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('🔍 SUPER VERBOSE MANAGER DEBUGGING!');
-  console.log('✨ Shows exact sample data from manager field');
-  console.log('🎯 Explicit ✅/❌ markers for manager field status');
-  console.log('📊 Clear reason if manager field is skipped');
+  console.log('🎯 MAJOR FIX: Processes ALL Data Fields!');
+  console.log('✨ No longer limited to metadata fields');
+  console.log('📊 Handles manager, blueprint, and ANY field in response');
+  console.log('🔍 Auto-detects types from actual data');
   console.log('======================================================================');
 });
