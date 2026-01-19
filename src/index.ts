@@ -1,9 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.9.1 - Extract Fields from AI Plan
- * - CRITICAL FIX: Extract requested fields from AI plan, not user message
- * - Fixes Hebrew/Unicode field name detection
- * - Fields marked as explicitly requested even with 1 unique value
- * - Shows charts even when all records have same value
+ * Clarity PPM HTTP Server v4.9.2 - Build Fix + Better Logging
+ * - FIXED: TypeScript build error (executionResult → execution)
+ * - Added detailed logging for unique value counting
+ * - Shows null counts and unique values for requested fields
+ * - Better debugging for Hebrew fields
  */
 
 import express, { Request, Response } from 'express';
@@ -650,30 +650,42 @@ async function prepareVisualizationData(
     // Check if this field has data in the records
     let hasData = false;
     let sampleValues = new Set<string>();
+    let nullCount = 0;
     
     for (const record of data) {
       const value = record[attr.apiName];
-      if (value !== null && value !== undefined) {
-        hasData = true;
-        
-        // Extract code for counting unique values
-        let code: string;
-        if (typeof value === 'object' && value._type === 'lookup') {
-          code = String(value.id || '');
-        } else if (typeof value === 'object' && value.code !== undefined) {
-          code = String(value.code);
-        } else if (typeof value === 'number') {
-          code = String(value);
-        } else if (typeof value === 'boolean') {
-          code = String(value);
-        } else {
-          code = String(value);
-        }
-        
-        sampleValues.add(code);
-        
-        // Stop sampling after finding enough unique values
-        if (sampleValues.size >= 50) break;
+      if (value === null || value === undefined) {
+        nullCount++;
+        continue;
+      }
+      
+      hasData = true;
+      
+      // Extract code for counting unique values
+      let code: string;
+      if (typeof value === 'object' && value._type === 'lookup') {
+        code = String(value.id || value.code || '');
+      } else if (typeof value === 'object' && value.code !== undefined) {
+        code = String(value.code);
+      } else if (typeof value === 'number') {
+        code = String(value);
+      } else if (typeof value === 'boolean') {
+        code = String(value);
+      } else {
+        code = String(value);
+      }
+      
+      sampleValues.add(code);
+      
+      // Stop sampling after finding enough unique values
+      if (sampleValues.size >= 50) break;
+    }
+    
+    // Log statistics for explicitly requested fields
+    if (explicitlyRequested) {
+      console.log(`[Visualization] Field "${fieldName}" stats: ${sampleValues.size} unique values, ${nullCount} null records out of ${data.length} total`);
+      if (sampleValues.size <= 10) {
+        console.log(`[Visualization] Unique values: ${Array.from(sampleValues).join(', ')}`);
       }
     }
     
@@ -1571,8 +1583,8 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
     
     // Extract requested fields from the AI's execution plan (more reliable than parsing user message)
     const requestedFields: string[] = [];
-    if (executionResult.plan?.steps?.[0]?.fields) {
-      const planFields = executionResult.plan.steps[0].fields;
+    if (execution.plan?.steps?.[0]?.fields) {
+      const planFields = execution.plan.steps[0].fields;
       // Exclude _internalId and _self
       requestedFields.push(...planFields.filter((f: string) => f !== '_internalId' && f !== '_self'));
       console.log('[Analytics] Extracted requested fields from AI plan:', requestedFields);
@@ -1810,7 +1822,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.9.1-extract-from-ai-plan',
+    version: '4.9.2-build-fix-better-logging',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1941,7 +1953,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Extract Fields from AI Plan v4.9.1');
+  console.log('🚀 Clarity PPM Build Fix + Better Logging v4.9.2');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1952,9 +1964,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('🎯 CRITICAL FIX: Extracts fields from AI plan!');
-  console.log('🌍 Hebrew fields now explicitly requested');
-  console.log('📊 Shows charts even with 1 unique value');
-  console.log('✅ Works with any language');
+  console.log('✅ FIXED: TypeScript build error');
+  console.log('🔍 Detailed logging for Hebrew fields');
+  console.log('📊 Shows null counts and unique values');
+  console.log('🌍 Works with any language');
   console.log('======================================================================');
 });
