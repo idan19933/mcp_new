@@ -1,5 +1,5 @@
 /**
- * Clarity PPM HTTP Server v4.4.0 - Comprehensive Grouping Edition
+ * Clarity PPM HTTP Server v4.4.1 - Comprehensive Grouping Edition (BUILD FIX)
  * - Automatically analyzes ALL lookup fields from describeAttributes
  * - Creates visualizations for every groupable field with data
  * - Intelligent field filtering (skips dates, IDs, text fields)
@@ -7,6 +7,7 @@
  * - Falls back to /lookupValues API for complete data
  * - Handles Clarity's lookup format: {displayValue, _type: "lookup", id}
  * - Smart detection of interesting fields (2-100 unique values)
+ * - FIXED: Added extendedType to AttributeMetadata interface
  */
 
 import express, { Request, Response } from 'express';
@@ -168,6 +169,7 @@ interface AttributeMetadata {
   maxLength?: number;
   isCustom: boolean;
   actionType?: string;
+  extendedType?: string;  // e.g., "percent", "double", "integer", "money"
 }
 
 const metadataCache = new Map<string, ObjectMetadata>();
@@ -420,7 +422,8 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
       lookupValues: attr.lookupValues || attr.validValues || [],
       maxLength: attr.maxLength,
       isCustom: attr.isCustom === true,
-      actionType: attr.actionType
+      actionType: attr.actionType,
+      extendedType: attr.extendedType
     }));
     
     const metadata: ObjectMetadata = {
@@ -1616,7 +1619,7 @@ async function formatResponse(execution: any): Promise<any> {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.4.0-comprehensive-grouping',
+    version: '4.4.1-build-fix',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1747,7 +1750,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Comprehensive Grouping Server v4.4.0');
+  console.log('🚀 Clarity PPM Comprehensive Grouping Server v4.4.1 (BUILD FIX)');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
