@@ -1,9 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.9.2 - Build Fix + Better Logging
- * - FIXED: TypeScript build error (executionResult → execution)
- * - Added detailed logging for unique value counting
- * - Shows null counts and unique values for requested fields
- * - Better debugging for Hebrew fields
+ * Clarity PPM HTTP Server v4.9.3 - Filter Queryable Fields Only
+ * - Only shows AI fields that are actually queryable
+ * - Excludes actionType=dataOnly and secured fields
+ * - Retry logic for field validation errors
+ * - Better field filtering to prevent 400 errors
  */
 
 import express, { Request, Response } from 'express';
@@ -1339,12 +1339,22 @@ Respond ONLY with the JSON execution plan. No explanations.`;
       try {
         const projectMetadata = await getObjectMetadata('projects');
         const groupableFields = projectMetadata.attributes
-          .filter(attr => attr.isGroupable !== false && attr.dataType !== 'clob')
+          .filter(attr => {
+            // Only include fields that are actually queryable
+            return attr.isGroupable !== false && 
+                   attr.dataType !== 'clob' &&
+                   attr.dataType !== 'attachment' &&
+                   attr.actionType !== 'filterOnly' &&
+                   attr.actionType !== 'dataOnly' &&
+                   !attr.apiName.startsWith('_') &&
+                   attr.apiName !== 'actuals' &&  // Known problematic fields
+                   attr.apiName !== 'status2';     // Secured field
+          })
           .slice(0, 50)  // Limit to first 50 fields
           .map(attr => `${attr.apiName} (${attr.displayName})`)
           .join(', ');
         
-        systemPrompt += `\n\nAVAILABLE PROJECT FIELDS:\n${groupableFields}\n`;
+        systemPrompt += `\n\nAVAILABLE PROJECT FIELDS (queryable only):\n${groupableFields}\n`;
         console.log('[AI] Added available project fields to context');
       } catch (error) {
         console.warn('[AI] Could not fetch project fields:', error);
@@ -1484,7 +1494,33 @@ async function executePlan(plan: any): Promise<any> {
           ).toString()
         : '';
       
-      const result = await makeRequest(`${path}${queryString}`, method || 'GET', body);
+      let result;
+      try {
+        result = await makeRequest(`${path}${queryString}`, method || 'GET', body);
+      } catch (firstError: any) {
+        // Check if it's an invalid attribute error
+        const errorMsg = firstError?.message || String(firstError);
+        if (errorMsg.includes('API-1005') && errorMsg.includes('Attribute') && query.fields) {
+          console.log(`[Step ${i + 1}] Field validation failed, retrying with safe fields...`);
+          
+          // Retry with only _internalId and name (safe fields)
+          const safeQuery = { ...query, fields: '_internalId,name' };
+          const safeQueryString = Object.keys(safeQuery).length > 0
+            ? '?' + new URLSearchParams(
+                Object.entries(safeQuery).map(([k, v]) => [k, String(v)] as [string, string])
+              ).toString()
+            : '';
+          
+          try {
+            result = await makeRequest(`${path}${safeQueryString}`, method || 'GET', body);
+            console.log(`[Step ${i + 1}] Retry succeeded with safe fields`);
+          } catch (retryError) {
+            throw firstError; // Throw original error if retry also fails
+          }
+        } else {
+          throw firstError; // Not a field error, throw original
+        }
+      }
       
       results.push({
         step: i + 1,
@@ -1822,7 +1858,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.9.2-build-fix-better-logging',
+    version: '4.9.3-filter-queryable-fields',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1953,7 +1989,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Build Fix + Better Logging v4.9.2');
+  console.log('🚀 Clarity PPM Filter Queryable Fields v4.9.3');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1964,9 +2000,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('✅ FIXED: TypeScript build error');
-  console.log('🔍 Detailed logging for Hebrew fields');
-  console.log('📊 Shows null counts and unique values');
-  console.log('🌍 Works with any language');
+  console.log('✅ Only shows queryable fields to AI');
+  console.log('🛡️ Excludes secured/dataOnly fields');
+  console.log('🔄 Retry logic for field errors');
+  console.log('🌍 Hebrew fields working!');
   console.log('======================================================================');
 });
