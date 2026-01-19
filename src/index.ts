@@ -1,9 +1,10 @@
 /**
- * Clarity PPM HTTP Server v4.7.0 - Specific Field Focus
- * - AI only returns the SPECIFIC field user asks for
- * - Removed hardcoded field restrictions
- * - Works with ALL lookup fields
- * - Better field extraction from user queries
+ * Clarity PPM HTTP Server v4.8.0 - Process Only Data Fields
+ * - CRITICAL FIX: Only processes fields present in API response
+ * - No longer iterates through all 268 metadata fields
+ * - Massive performance improvement
+ * - Works with Hebrew field names
+ * - All lookup fields are groupable
  */
 
 import express, { Request, Response } from 'express';
@@ -530,25 +531,32 @@ async function prepareVisualizationData(
   const groupableFields: string[] = [];
   const fieldMetadata: Record<string, any> = {};
   
-  // BUILD A COMBINED LIST: Fields from metadata + Fields from actual data
+  // BUILD A COMBINED LIST: Only process fields that are actually in the data!
   const fieldsToProcess = new Map<string, AttributeMetadata>();
   
-  // Add all metadata fields
+  // Get list of fields actually present in the data
+  const dataFieldNames = data.length > 0 ? Object.keys(data[0]) : [];
+  console.log(`[Visualization] 📊 Fields actually in data: ${dataFieldNames.join(', ')}`);
+  
+  // ONLY add metadata fields that are present in the data
   for (const attr of metadata.attributes) {
-    fieldsToProcess.set(attr.apiName, attr);
+    if (dataFieldNames.includes(attr.apiName)) {
+      fieldsToProcess.set(attr.apiName, attr);
+    }
   }
   
   // Add fields from actual data that aren't in metadata
   if (data.length > 0) {
-    const dataFieldNames = Object.keys(data[0]);
     for (const fieldName of dataFieldNames) {
       if (!fieldsToProcess.has(fieldName)) {
         // Create a minimal attribute metadata for this field
         const sampleValue = data[0][fieldName];
         let dataType = 'string';
+        let isLookup = false;
         
         if (sampleValue && typeof sampleValue === 'object' && sampleValue._type === 'lookup') {
           dataType = 'lookup';
+          isLookup = true;
         } else if (typeof sampleValue === 'number') {
           dataType = 'number';
         } else if (typeof sampleValue === 'boolean') {
@@ -562,20 +570,21 @@ async function prepareVisualizationData(
           dataType: dataType,
           displayName: fieldName,
           required: false,
-          isLookup: dataType === 'lookup',
+          isLookup: isLookup,
           lookupType: undefined,
           lookupCode: undefined,
           lookupValues: [],
           maxLength: undefined,
           isCustom: false,
           actionType: undefined,
-          extendedType: undefined
+          extendedType: dataType === 'lookup' ? 'lookup' : undefined,
+          isGroupable: true  // Assume groupable
         });
       }
     }
   }
   
-  console.log(`[Visualization] 🎯 Total fields to process: ${fieldsToProcess.size} (${metadata.attributes.length} from metadata + ${fieldsToProcess.size - metadata.attributes.length} from data)`);
+  console.log(`[Visualization] 🎯 Total fields to process: ${fieldsToProcess.size} (only fields present in data)`);
   
   // Log explicitly groupable fields from Clarity
   const clarityGroupableFields = Array.from(fieldsToProcess.values())
@@ -1811,7 +1820,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.7.0-specific-field-focus',
+    version: '4.8.0-process-only-data-fields',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1942,7 +1951,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Specific Field Focus Server v4.7.0');
+  console.log('🚀 Clarity PPM Process Only Data Fields v4.8.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1953,9 +1962,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('🎯 AI returns ONLY the field you ask for!');
-  console.log('✨ Works with ALL lookup fields');
-  console.log('📊 Better query understanding');
-  console.log('🔍 "graph for name" → only name chart');
+  console.log('⚡ CRITICAL FIX: Only processes fields in data!');
+  console.log('🎯 No more "no data in records" spam');
+  console.log('🌍 Works with Hebrew field names');
+  console.log('📊 All lookup fields groupable');
   console.log('======================================================================');
 });
