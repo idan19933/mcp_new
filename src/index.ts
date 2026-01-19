@@ -1,9 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.6.0 - Process Data Fields Edition
- * - MAJOR FIX: Processes fields from actual API data, not just metadata
- * - Handles fields filtered out by describeAttributes (like manager)
- * - Auto-detects field types from data when metadata unavailable
- * - Works with ANY groupable field in the response
+ * Clarity PPM HTTP Server v4.6.1 - isGroupable Support
+ * - Respects Clarity's isGroupable flag from metadata
+ * - Skips fields explicitly marked as not groupable
+ * - Prioritizes fields marked as groupable
+ * - Better detection of lookup fields (extendedType='lookup')
  */
 
 import express, { Request, Response } from 'express';
@@ -165,7 +165,8 @@ interface AttributeMetadata {
   maxLength?: number;
   isCustom: boolean;
   actionType?: string;
-  extendedType?: string;  // e.g., "percent", "double", "integer", "money"
+  extendedType?: string;  // e.g., "percent", "double", "integer", "money", "lookup", "obs"
+  isGroupable?: boolean;  // Clarity's explicit groupable flag
 }
 
 const metadataCache = new Map<string, ObjectMetadata>();
@@ -410,16 +411,17 @@ async function getObjectMetadata(objectName: string, forceRefresh: boolean = fal
     const attributes: AttributeMetadata[] = (attributesResult._results || []).map((attr: any) => ({
       apiName: attr.apiName || attr.name,
       dataType: attr.dataType || 'string',
-      displayName: attr.displayName || attr.apiName || attr.name,
-      required: attr.required === true,
-      isLookup: attr.dataType === 'lookup',
+      displayName: attr.displayName || attr.label || attr.apiName || attr.name,
+      required: attr.required === true || attr.isRequired === true,
+      isLookup: attr.dataType === 'lookup' || attr.extendedType === 'lookup',
       lookupType: attr.lookupType,
       lookupCode: attr.lookupCode,
       lookupValues: attr.lookupValues || attr.validValues || [],
       maxLength: attr.maxLength,
       isCustom: attr.isCustom === true,
       actionType: attr.actionType,
-      extendedType: attr.extendedType
+      extendedType: attr.extendedType,
+      isGroupable: attr.isGroupable
     }));
     
     const metadata: ObjectMetadata = {
@@ -575,6 +577,14 @@ async function prepareVisualizationData(
   
   console.log(`[Visualization] 🎯 Total fields to process: ${fieldsToProcess.size} (${metadata.attributes.length} from metadata + ${fieldsToProcess.size - metadata.attributes.length} from data)`);
   
+  // Log explicitly groupable fields from Clarity
+  const clarityGroupableFields = Array.from(fieldsToProcess.values())
+    .filter(attr => (attr as any).isGroupable === true)
+    .map(attr => attr.apiName);
+  if (clarityGroupableFields.length > 0) {
+    console.log(`[Visualization] 📌 Clarity marked ${clarityGroupableFields.length} fields as groupable: ${clarityGroupableFields.slice(0, 10).join(', ')}${clarityGroupableFields.length > 10 ? '...' : ''}`);
+  }
+  
   // Process each field
   for (const [fieldName, attr] of fieldsToProcess.entries()) {
     
@@ -605,6 +615,12 @@ async function prepareVisualizationData(
     
     // Skip non-groupable fields (unless explicitly requested)
     if (!explicitlyRequested) {
+      // Check if Clarity says this field is not groupable
+      if ((attr as any).isGroupable === false) {
+        console.log(`[Visualization] Skipping ${fieldName}: Clarity marked as not groupable`);
+        continue;
+      }
+      
       if (attr.dataType === 'clob' || 
           attr.dataType === 'attachment' || 
           attr.dataType === 'tsv' ||
@@ -1815,7 +1831,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.6.0-process-data-fields',
+    version: '4.6.1-isgroupable-support',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1946,7 +1962,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Process Data Fields Server v4.6.0');
+  console.log('🚀 Clarity PPM isGroupable Support Server v4.6.1');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1957,9 +1973,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('🎯 MAJOR FIX: Processes ALL Data Fields!');
-  console.log('✨ No longer limited to metadata fields');
-  console.log('📊 Handles manager, blueprint, and ANY field in response');
-  console.log('🔍 Auto-detects types from actual data');
+  console.log('🎯 Respects Clarity isGroupable Flag!');
+  console.log('✨ Uses isGroupable=true from metadata');
+  console.log('📊 Processes data fields + metadata fields');
+  console.log('🔍 Better lookup detection');
   console.log('======================================================================');
 });
