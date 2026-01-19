@@ -1,9 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.5.2 - Enhanced Debugging Edition
- * - Added detailed logging for manager field detection
- * - Summary report showing which fields were included
- * - Debug output for explicitly requested fields
- * - Helps diagnose why fields are being skipped
+ * Clarity PPM HTTP Server v4.5.3 - Super Verbose Manager Debugging
+ * - Added extensive logging specifically for manager field
+ * - Shows sample data from multiple records
+ * - Explicit markers when manager field is included/skipped
+ * - Logs reason for skipping if it happens
  */
 
 import express, { Request, Response } from 'express';
@@ -515,12 +515,17 @@ async function prepareVisualizationData(
     
     // SPECIAL DEBUG: Log manager field details
     if (fieldName === 'manager' || fieldName.toLowerCase().includes('manager')) {
+      console.log(`\n[Visualization] ==========================================`);
       console.log(`[Visualization] 🔍 MANAGER FIELD DEBUG: ${fieldName}`);
       console.log(`  - dataType: ${attr.dataType}`);
       console.log(`  - isLookup: ${attr.isLookup}`);
       console.log(`  - lookupCode: ${attr.lookupCode}`);
       console.log(`  - displayName: ${attr.displayName}`);
-      console.log(`  - Sample data from first record:`, data[0]?.[fieldName]);
+      console.log(`  - Sample data from first 3 records:`);
+      for (let i = 0; i < Math.min(3, data.length); i++) {
+        console.log(`    Record ${i}: ${JSON.stringify(data[i]?.[fieldName])}`);
+      }
+      console.log(`[Visualization] ==========================================\n`);
     }
     
     // Check if this field was explicitly requested
@@ -528,6 +533,10 @@ async function prepareVisualizationData(
       fieldName.toLowerCase().includes(rf.toLowerCase()) || 
       attr.displayName.toLowerCase().includes(rf.toLowerCase())
     );
+    
+    if (explicitlyRequested) {
+      console.log(`[Visualization] ⭐ Field "${fieldName}" is EXPLICITLY REQUESTED by user`);
+    }
     
     // Skip non-groupable fields (unless explicitly requested)
     if (!explicitlyRequested) {
@@ -576,24 +585,39 @@ async function prepareVisualizationData(
     
     // Skip if no data
     if (!hasData) {
-      console.log(`[Visualization] Skipping ${fieldName}: no data in records`);
+      if (fieldName === 'manager' || fieldName.toLowerCase().includes('manager')) {
+        console.log(`[Visualization] ❌ MANAGER FIELD "${fieldName}" SKIPPED: no data in records`);
+      } else {
+        console.log(`[Visualization] Skipping ${fieldName}: no data in records`);
+      }
       continue;
     }
     
     // Skip if only one unique value (unless explicitly requested)
     if (sampleValues.size < 2 && !explicitlyRequested) {
-      console.log(`[Visualization] Skipping ${fieldName}: only ${sampleValues.size} unique value(s)`);
+      if (fieldName === 'manager' || fieldName.toLowerCase().includes('manager')) {
+        console.log(`[Visualization] ❌ MANAGER FIELD "${fieldName}" SKIPPED: only ${sampleValues.size} unique value(s)`);
+      } else {
+        console.log(`[Visualization] Skipping ${fieldName}: only ${sampleValues.size} unique value(s)`);
+      }
       continue;
     }
     
     // Skip if too many unique values (unless explicitly requested or it's a lookup)
     if (sampleValues.size > 100 && !explicitlyRequested && !attr.isLookup) {
-      console.log(`[Visualization] Skipping ${fieldName}: too many unique values (${sampleValues.size})`);
+      if (fieldName === 'manager' || fieldName.toLowerCase().includes('manager')) {
+        console.log(`[Visualization] ❌ MANAGER FIELD "${fieldName}" SKIPPED: too many unique values (${sampleValues.size})`);
+      } else {
+        console.log(`[Visualization] Skipping ${fieldName}: too many unique values (${sampleValues.size})`);
+      }
       continue;
     }
     
-    console.log(`[Visualization] ✓ Found groupable field: ${fieldName} (${attr.dataType}, ${sampleValues.size} unique values)${explicitlyRequested ? ' [USER REQUESTED]' : ''}`);
-    
+    if (fieldName === 'manager' || fieldName.toLowerCase().includes('manager')) {
+      console.log(`[Visualization] ✅ MANAGER FIELD "${fieldName}" INCLUDED! (${sampleValues.size} unique values)${explicitlyRequested ? ' [USER REQUESTED]' : ''}`);
+    } else {
+      console.log(`[Visualization] ✓ Found groupable field: ${fieldName} (${attr.dataType}, ${sampleValues.size} unique values)${explicitlyRequested ? ' [USER REQUESTED]' : ''}`);
+    }    
     groupableFields.push(attr.apiName);
     fieldMetadata[attr.apiName] = {
       displayName: attr.displayName,
@@ -1726,7 +1750,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.5.2-enhanced-debugging',
+    version: '4.5.3-super-verbose-debug',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1857,7 +1881,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Enhanced Debugging Server v4.5.2');
+  console.log('🚀 Clarity PPM Super Verbose Debug Server v4.5.3');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1868,9 +1892,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('🔍 Enhanced Debugging Mode!');
-  console.log('✨ Detailed logging for field detection');
-  console.log('🎯 Special debug output for manager field');
-  console.log('📊 Summary report of included fields');
+  console.log('🔍 SUPER VERBOSE MANAGER DEBUGGING!');
+  console.log('✨ Shows exact sample data from manager field');
+  console.log('🎯 Explicit ✅/❌ markers for manager field status');
+  console.log('📊 Clear reason if manager field is skipped');
   console.log('======================================================================');
 });
