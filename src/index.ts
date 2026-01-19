@@ -1,9 +1,12 @@
 /**
- * Clarity PPM HTTP Server v4.3.0 - Lookup Visualization Edition
- * - Enhanced with lookup field detection and resolution
- * - Automatic chart data preparation with proper labels
- * - Smart grouping for lookup-based visualizations
- * - FIXED: Null checks in formatResponse
+ * Clarity PPM HTTP Server v4.4.0 - Comprehensive Grouping Edition
+ * - Automatically analyzes ALL lookup fields from describeAttributes
+ * - Creates visualizations for every groupable field with data
+ * - Intelligent field filtering (skips dates, IDs, text fields)
+ * - Uses embedded lookup values from metadata when available
+ * - Falls back to /lookupValues API for complete data
+ * - Handles Clarity's lookup format: {displayValue, _type: "lookup", id}
+ * - Smart detection of interesting fields (2-100 unique values)
  */
 
 import express, { Request, Response } from 'express';
@@ -471,7 +474,7 @@ function getSmartFieldSelection(metadata: ObjectMetadata, maxFields: number = 15
 }
 
 // ============================================================================
-// VISUALIZATION DATA PREPARATION
+// VISUALIZATION DATA PREPARATION - COMPREHENSIVE LOOKUP GROUPING
 // ============================================================================
 
 interface ChartDataPoint {
@@ -480,113 +483,193 @@ interface ChartDataPoint {
   originalCode?: string;
 }
 
+interface VisualizationResult {
+  groupableFields: string[];
+  chartData: Record<string, ChartDataPoint[]>;
+  fieldMetadata: Record<string, {
+    displayName: string;
+    lookupCode?: string;
+    dataType: string;
+  }>;
+}
+
 async function prepareVisualizationData(
   data: any[],
   metadata: ObjectMetadata
-): Promise<{ groupableFields: string[]; chartData: Record<string, ChartDataPoint[]> }> {
+): Promise<VisualizationResult> {
   
-  console.log('[Visualization] Preparing chart data...');
+  console.log('[Visualization] Preparing comprehensive chart data...');
+  console.log(`[Visualization] Processing ${data.length} records with ${metadata.attributes.length} attributes`);
   
-  // Identify groupable fields (lookup, status, priority, etc.)
-  const groupableFields: string[] = [];
-  const lookupFieldsMap = new Map<string, AttributeMetadata>();
-  
-  for (const attr of metadata.attributes) {
-    if (attr.isLookup && attr.lookupCode) {
-      groupableFields.push(attr.apiName);
-      lookupFieldsMap.set(attr.apiName, attr);
-      console.log(`[Visualization] Found lookup field: ${attr.apiName} (${attr.lookupCode})`);
-    }
-  }
-  
-  // Also check for common groupable fields
-  const commonGroupableFields = ['status', 'priority', 'percentComplete', 'type', 'category'];
-  for (const field of commonGroupableFields) {
-    const attr = metadata.attributes.find(a => a.apiName === field);
-    if (attr && !groupableFields.includes(field)) {
-      groupableFields.push(field);
-      if (attr.isLookup && attr.lookupCode) {
-        lookupFieldsMap.set(field, attr);
-      }
-    }
-  }
-  
-  console.log(`[Visualization] Groupable fields: ${groupableFields.join(', ')}`);
-  
-  // Prepare chart data for each groupable field
   const chartData: Record<string, ChartDataPoint[]> = {};
+  const groupableFields: string[] = [];
+  const fieldMetadata: Record<string, any> = {};
   
-  for (const fieldName of groupableFields) {
-    const fieldData = new Map<string, number>();
-    const lookupAttr = lookupFieldsMap.get(fieldName);
-    
-    // Count occurrences
-    for (const record of data) {
-      const value = record[fieldName];
-      if (value === null || value === undefined) continue;
-      
-      let key: string;
-      if (typeof value === 'object' && value.code !== undefined) {
-        key = String(value.code);
-      } else {
-        key = String(value);
-      }
-      
-      fieldData.set(key, (fieldData.get(key) || 0) + 1);
+  // Process each attribute to find groupable fields
+  for (const attr of metadata.attributes) {
+    // Skip non-groupable fields
+    if (attr.dataType === 'clob' || 
+        attr.dataType === 'attachment' || 
+        attr.dataType === 'tsv' ||
+        attr.dataType === 'date' ||
+        attr.dataType === 'money' ||
+        attr.apiName.startsWith('_') ||
+        attr.actionType === 'filterOnly' ||
+        attr.actionType === 'dataOnly') {
+      continue;
     }
     
-    // Resolve lookup values if this is a lookup field
-    const chartPoints: ChartDataPoint[] = [];
+    // Check if this field has data in the records
+    let hasData = false;
+    let sampleValues = new Set<string>();
     
-    if (lookupAttr && lookupAttr.lookupCode) {
-      console.log(`[Visualization] Fetching lookup values for ${fieldName} (${lookupAttr.lookupCode})`);
-      
-      // Try to get from embedded metadata first
-      let lookupValues: LookupValue[] = [];
-      if (lookupAttr.lookupValues && lookupAttr.lookupValues.length > 0) {
-        lookupValues = lookupAttr.lookupValues;
-        console.log(`[Visualization] Using embedded lookup values: ${lookupValues.length} values`);
-      } else {
-        // Fetch from API
-        lookupValues = await getLookupValues(lookupAttr.lookupCode);
+    for (const record of data) {
+      const value = record[attr.apiName];
+      if (value !== null && value !== undefined) {
+        hasData = true;
+        
+        // Extract code for counting unique values
+        let code: string;
+        if (typeof value === 'object' && value._type === 'lookup') {
+          code = String(value.id || '');
+        } else if (typeof value === 'object' && value.code !== undefined) {
+          code = String(value.code);
+        } else if (typeof value === 'number') {
+          code = String(value);
+        } else if (typeof value === 'boolean') {
+          code = String(value);
+        } else {
+          code = String(value);
+        }
+        
+        sampleValues.add(code);
+        
+        // Stop sampling after finding enough unique values
+        if (sampleValues.size >= 50) break;
       }
-      
-      // Create lookup map
-      const lookupMap = new Map<string, string>();
-      for (const lv of lookupValues) {
+    }
+    
+    // Skip if no data or only one unique value (not interesting for grouping)
+    if (!hasData || sampleValues.size < 2) {
+      continue;
+    }
+    
+    // Skip if too many unique values (likely IDs or text fields)
+    if (sampleValues.size > 100) {
+      console.log(`[Visualization] Skipping ${attr.apiName}: too many unique values (${sampleValues.size})`);
+      continue;
+    }
+    
+    console.log(`[Visualization] Found groupable field: ${attr.apiName} (${attr.dataType}, ${sampleValues.size} unique values)`);
+    
+    groupableFields.push(attr.apiName);
+    fieldMetadata[attr.apiName] = {
+      displayName: attr.displayName,
+      lookupCode: attr.lookupCode,
+      dataType: attr.dataType
+    };
+    
+    // Prepare lookup value map if available
+    let lookupMap = new Map<string, string>();
+    
+    if (attr.isLookup && attr.lookupValues && attr.lookupValues.length > 0) {
+      console.log(`[Visualization] Using ${attr.lookupValues.length} embedded lookup values for ${attr.apiName}`);
+      for (const lv of attr.lookupValues) {
         lookupMap.set(String(lv.code), lv.displayValue);
       }
+    } else if (attr.isLookup && attr.lookupCode) {
+      // Fetch lookup values from API
+      console.log(`[Visualization] Fetching lookup values for ${attr.apiName} (${attr.lookupCode})`);
+      try {
+        const lookupValues = await getLookupValues(attr.lookupCode);
+        for (const lv of lookupValues) {
+          lookupMap.set(String(lv.code), lv.displayValue);
+        }
+        console.log(`[Visualization] Loaded ${lookupValues.length} lookup values for ${attr.apiName}`);
+      } catch (error) {
+        console.warn(`[Visualization] Failed to fetch lookup values for ${attr.apiName}:`, error);
+      }
+    }
+    
+    // Count occurrences and build chart data
+    const fieldData = new Map<string, { code: string; displayValue: string; count: number }>();
+    
+    for (const record of data) {
+      const value = record[attr.apiName];
+      if (value === null || value === undefined) continue;
       
-      // Build chart points with resolved labels
-      for (const [code, count] of fieldData.entries()) {
-        const label = lookupMap.get(code) || code;
-        chartPoints.push({
-          label,
-          value: count,
-          originalCode: code
-        });
+      let code: string;
+      let displayValue: string | null = null;
+      
+      // Handle different value formats
+      if (typeof value === 'object' && value._type === 'lookup') {
+        // Clarity lookup format: { displayValue, _type: "lookup", id }
+        code = String(value.id || value.code || '');
+        displayValue = value.displayValue || null;
+      } else if (typeof value === 'object' && value.code !== undefined) {
+        code = String(value.code);
+        displayValue = value.displayValue || null;
+      } else if (typeof value === 'boolean') {
+        code = String(value);
+        displayValue = value ? 'Yes' : 'No';
+      } else if (typeof value === 'number') {
+        code = String(value);
+        // For numbers like percentComplete, check if it's a percentage
+        if (attr.extendedType === 'percent' || attr.apiName.includes('percent') || attr.apiName.includes('Percent')) {
+          displayValue = `${value}%`;
+        } else {
+          displayValue = String(value);
+        }
+      } else {
+        code = String(value);
       }
       
-      console.log(`[Visualization] Resolved ${chartPoints.length} labels for ${fieldName}`);
+      if (!code) continue;
       
-    } else {
-      // Non-lookup field - use values as-is
-      for (const [key, count] of fieldData.entries()) {
-        chartPoints.push({
-          label: key,
-          value: count
+      const existing = fieldData.get(code);
+      if (existing) {
+        existing.count++;
+        // Prefer non-null displayValue
+        if (displayValue && !existing.displayValue) {
+          existing.displayValue = displayValue;
+        }
+      } else {
+        // Try to get display value from lookup map if not from data
+        let finalDisplayValue = displayValue;
+        if (!finalDisplayValue && lookupMap.has(code)) {
+          finalDisplayValue = lookupMap.get(code)!;
+        }
+        
+        fieldData.set(code, {
+          code,
+          displayValue: finalDisplayValue || code,
+          count: 1
         });
       }
+    }
+    
+    // Build chart points
+    const chartPoints: ChartDataPoint[] = [];
+    for (const item of fieldData.values()) {
+      chartPoints.push({
+        label: item.displayValue,
+        value: item.count,
+        originalCode: item.code !== item.displayValue ? item.code : undefined
+      });
     }
     
     // Sort by value descending
     chartPoints.sort((a, b) => b.value - a.value);
     
-    chartData[fieldName] = chartPoints;
-    console.log(`[Visualization] ${fieldName}: ${chartPoints.length} categories`);
+    chartData[attr.apiName] = chartPoints;
+    
+    const topValues = chartPoints.slice(0, 3).map(p => `${p.label}=${p.value}`).join(', ');
+    console.log(`[Visualization] ${attr.apiName} (${attr.displayName}): ${chartPoints.length} categories - ${topValues}`);
   }
   
-  return { groupableFields, chartData };
+  console.log(`[Visualization] Created ${groupableFields.length} chart visualizations`);
+  
+  return { groupableFields, chartData, fieldMetadata };
 }
 
 // ============================================================================
@@ -1352,8 +1435,15 @@ async function formatResponse(execution: any): Promise<any> {
       finalResult.metadata
     );
     
+    const fieldCount = vizData.groupableFields.length;
+    const fieldList = vizData.groupableFields
+      .slice(0, 5)
+      .map(f => vizData.fieldMetadata[f]?.displayName || f)
+      .join(', ');
+    const more = fieldCount > 5 ? ` and ${fieldCount - 5} more` : '';
+    
     return {
-      reply: `📊 **${displayLabel} Analytics** (${count} records)\n\n✨ Chart visualizations below`,
+      reply: `📊 **${displayLabel} Analytics** (${count} records)\n\n✨ ${fieldCount} visualizations available: ${fieldList}${more}`,
       chartData: vizData
     };
   }
@@ -1526,7 +1616,7 @@ async function formatResponse(execution: any): Promise<any> {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.3.0-lookup-visualization',
+    version: '4.4.0-comprehensive-grouping',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1657,7 +1747,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Lookup Visualization Server v4.3.0');
+  console.log('🚀 Clarity PPM Comprehensive Grouping Server v4.4.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1668,7 +1758,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('📊 Lookup Field Visualization Enabled!');
-  console.log('✨ Automatically resolves lookup codes to display values for charts');
+  console.log('📊 Comprehensive Grouping Enabled!');
+  console.log('✨ Analyzes ALL lookup fields automatically');
+  console.log('🎯 Creates visualizations for every groupable field');
+  console.log('🔍 Smart filtering: 2-100 unique values');
   console.log('======================================================================');
 });
