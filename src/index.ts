@@ -1,9 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.6.1 - isGroupable Support
- * - Respects Clarity's isGroupable flag from metadata
- * - Skips fields explicitly marked as not groupable
- * - Prioritizes fields marked as groupable
- * - Better detection of lookup fields (extendedType='lookup')
+ * Clarity PPM HTTP Server v4.7.0 - Specific Field Focus
+ * - AI only returns the SPECIFIC field user asks for
+ * - Removed hardcoded field restrictions
+ * - Works with ALL lookup fields
+ * - Better field extraction from user queries
  */
 
 import express, { Request, Response } from 'express';
@@ -621,12 +621,17 @@ async function prepareVisualizationData(
         continue;
       }
       
+      // Skip system/technical fields
+      if (attr.apiName.startsWith('_') && attr.apiName !== '_internalId') {
+        console.log(`[Visualization] Skipping ${fieldName}: system field`);
+        continue;
+      }
+      
+      // Skip non-visual data types
       if (attr.dataType === 'clob' || 
           attr.dataType === 'attachment' || 
           attr.dataType === 'tsv' ||
-          attr.dataType === 'date' ||
-          attr.dataType === 'money' ||
-          attr.apiName.startsWith('_') ||
+          attr.dataType === 'richtext' ||
           attr.actionType === 'filterOnly' ||
           attr.actionType === 'dataOnly') {
         console.log(`[Visualization] Skipping ${fieldName}: non-groupable type (${attr.dataType})`);
@@ -1079,6 +1084,12 @@ async function analyzeUserRequest(message: string): Promise<any> {
 
   let systemPrompt = `You are a Clarity PPM API expert that uses intelligent metadata discovery and creates visual analytics.
 
+**CRITICAL - UNDERSTAND USER'S SPECIFIC FIELD REQUEST:**
+When the user asks for a SPECIFIC field (e.g., "show name distribution", "graph for name", "analyze status"), you MUST:
+1. Include ONLY that specific field + _internalId in the fields list
+2. Do NOT add other fields unless the user explicitly asks for them
+3. The field the user requests is THE ONLY ONE that matters
+
 **IMPORTANT - HANDLE GREETINGS:**
 If the user says ONLY a greeting like "hi", "hello", "hey" with NO other question, respond with:
 {
@@ -1086,19 +1097,11 @@ If the user says ONLY a greeting like "hi", "hello", "hey" with NO other questio
   "intent": "greeting"
 }
 
-**IMPORTANT - SPECIFIC FIELD REQUESTS:**
-When the user asks for distribution/breakdown/grouping BY a specific field, ALWAYS include that field in the fields list.
-Examples:
-- "distribution by blueprint" → include "blueprintId" or "blueprint" in fields
-- "group by manager" → include "manager" in fields  
-- "breakdown by status" → include "status" in fields
-- "analyze by priority" → include "priority" in fields
-
 **YOUR PROCESS:**
 1. Analyze the user's natural language request
 2. If it's JUST a greeting → return empty steps with "greeting" intent
-3. Identify the Clarity objects involved (projects, tasks, resources, etc.)
-4. **If user asks for distribution/grouping BY a specific field, make sure to include that field**
+3. **Identify WHICH SPECIFIC FIELD the user is asking about** (name, status, manager, priority, etc.)
+4. Identify the Clarity objects involved (projects, tasks, resources, etc.)
 5. Determine what operation is needed (count, list, get, create, update)
 6. Extract any filters or conditions
 7. Return a structured execution plan
@@ -1106,9 +1109,11 @@ Examples:
 **VISUAL ANALYTICS:**
 When users ask for distributions, analytics, breakdowns, or groupings:
 - ALWAYS use "list" operation to get full data (not count)
-- Include the grouping field that the user asked for (blueprint, status, priority, manager, etc.)
+- Include ONLY the SPECIFIC FIELD that the user asked for + _internalId
+- If user asks for "name distribution" → fields: ["name", "_internalId"]
+- If user asks for "status breakdown" → fields: ["status", "_internalId"]
+- If user asks for "all fields" or "everything" → include multiple common fields
 - Set limit high enough to get complete picture (500 for distributions)
-- The frontend will automatically create charts for data with groupable fields
 
 **AVAILABLE OPERATIONS:**
 - count: Count records (returns total number)
@@ -1139,7 +1144,7 @@ OBA: obaTasks, obaInvestments, obaStaffs, obaTodos
       "operation": "count|list|get|create|update|delete",
       "objectType": "projects",
       "filters": { "isActive": true, "status": "APPROVED" },
-      "fields": ["name", "code", "manager", "blueprint"],
+      "fields": ["name", "_internalId"],
       "limit": 50
     }
   ],
@@ -1150,192 +1155,111 @@ OBA: obaTasks, obaInvestments, obaStaffs, obaTodos
 
 Q: "How many active projects?"
 A: {
-  "steps": [
-    {
-      "operation": "count",
-      "objectType": "projects",
-      "filters": { "isActive": true }
-    }
-  ],
+  "steps": [{
+    "operation": "count",
+    "objectType": "projects",
+    "filters": { "isActive": true }
+  }],
   "intent": "count_active_projects"
 }
 
-Q: "Show me projects managed by user 5001"
+Q: "Show me project name distribution"
 A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "manager": 5001 },
-      "fields": ["name", "code", "status", "scheduleStart", "scheduleFinish"],
-      "limit": 50
-    }
-  ],
-  "intent": "list_projects_by_manager"
+  "steps": [{
+    "operation": "list",
+    "objectType": "projects",
+    "fields": ["name", "_internalId"],
+    "limit": 500
+  }],
+  "intent": "project_name_distribution_visual"
 }
 
-Q: "Create distribution of projects by blueprint"
+Q: "Create graph for project name"
 A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "fields": ["name", "blueprintId", "blueprint", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "project_blueprint_distribution_visual"
+  "steps": [{
+    "operation": "list",
+    "objectType": "projects",
+    "fields": ["name", "_internalId"],
+    "limit": 500
+  }],
+  "intent": "project_name_graph_visual"
+}
+
+Q: "Analyze task status"
+A: {
+  "steps": [{
+    "operation": "list",
+    "objectType": "tasks",
+    "fields": ["status", "_internalId"],
+    "limit": 500
+  }],
+  "intent": "task_status_analysis_visual"
+}
+
+Q: "Group projects by priority"
+A: {
+  "steps": [{
+    "operation": "list",
+    "objectType": "projects",
+    "fields": ["priority", "_internalId"],
+    "limit": 500
+  }],
+  "intent": "project_priority_grouping_visual"
 }
 
 Q: "Show distribution by manager"
 A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "fields": ["name", "manager", "_internalId"],
-      "limit": 500
-    }
-  ],
+  "steps": [{
+    "operation": "list",
+    "objectType": "projects",
+    "fields": ["manager", "_internalId"],
+    "limit": 500
+  }],
   "intent": "project_manager_distribution_visual"
 }
 
-Q: "Group projects by status"
+Q: "Create distribution of projects by blueprint"
 A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "fields": ["name", "status", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "project_status_grouping_visual"
+  "steps": [{
+    "operation": "list",
+    "objectType": "projects",
+    "fields": ["blueprintId", "_internalId"],
+    "limit": 500
+  }],
+  "intent": "project_blueprint_distribution_visual"
 }
 
-Q: "Show task status distribution for project Alpha"
+Q: "Show me all project analytics"
 A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "name": "Alpha" },
-      "fields": ["_internalId", "name"]
-    },
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "fields": ["name", "status", "percentComplete", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "task_status_distribution_visual"
+  "steps": [{
+    "operation": "list",
+    "objectType": "projects",
+    "fields": ["name", "status", "manager", "priority", "percentComplete", "_internalId"],
+    "limit": 500
+  }],
+  "intent": "project_comprehensive_analytics_visual"
 }
 
-Q: "Break down completion for project Beta"
+Q: "List projects managed by user 5001"
 A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "name": "Beta" },
-      "fields": ["_internalId", "name"]
-    },
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks",
-      "fields": ["name", "percentComplete", "status", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "completion_breakdown_visual"
-}
-
-Q: "Analyze task priorities"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "tasks",
-      "fields": ["name", "priority", "status", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "priority_distribution_visual"
-}
-
-Q: "Show distribution of custTaskUpdates"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "custTaskUpdates",
-      "fields": ["name", "status", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "custom_object_distribution_visual"
-}
-
-Q: "Create me distribution of tasks in system"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "tasks",
-      "fields": ["name", "status", "percentComplete", "priority", "_internalId"],
-      "limit": 500
-    }
-  ],
-  "intent": "task_distribution_visual"
-}
-
-Q: "List tasks for project 5003001"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "_internalId": 5003001 },
-      "childType": "tasks",
-      "fields": ["name", "status", "percentComplete", "assignedTo"]
-    }
-  ],
-  "intent": "list_project_tasks"
-}
-
-Q: "How many tasks in project Alpha"
-A: {
-  "steps": [
-    {
-      "operation": "list",
-      "objectType": "projects",
-      "filters": { "name": "Alpha" },
-      "fields": ["_internalId", "name"]
-    },
-    {
-      "operation": "count",
-      "objectType": "projects",
-      "parentId": "STEP_1_ID",
-      "childType": "tasks"
-    }
-  ],
-  "intent": "count_project_tasks"
+  "steps": [{
+    "operation": "list",
+    "objectType": "projects",
+    "filters": { "manager": 5001 },
+    "fields": ["name", "code", "status", "_internalId"],
+    "limit": 50
+  }],
+  "intent": "list_projects_by_manager"
 }
 
 **IMPORTANT RULES:**
-1. For "distribution", "breakdown", "analyze" queries - Use LIST operation with limit=500
-2. **When user asks for distribution BY a field, INCLUDE that field in the fields list**
-3. Include groupable fields: status, percentComplete, priority, type, category, blueprint, manager
-4. For "how many" queries - Use COUNT operation
-5. For parent-child queries - Use TWO steps with parentId: "STEP_1_ID"
-6. Always include _internalId in field selection
-7. For CREATE/UPDATE - Use "data" field with required attributes
-8. Visual analytics keywords: distribution, breakdown, analyze, show breakdown, group by
+1. For "distribution", "breakdown", "analyze", "graph", "chart" queries - Use LIST operation with limit=500
+2. **When user asks for a SPECIFIC field, include ONLY that field + _internalId, nothing else**
+3. For "how many" queries - Use COUNT operation
+4. For parent-child queries - Use TWO steps with parentId: "STEP_1_ID"
+5. Always include _internalId in field selection
+6. For CREATE/UPDATE - Use "data" field with required attributes
+7. Visual analytics keywords: distribution, breakdown, analyze, show breakdown, group by, graph, chart
 
 User Query: "${message}"
 
@@ -1632,13 +1556,25 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
         });
       }
       
-      // Look for common field names in the message
-      const commonFields = ['blueprint', 'status', 'priority', 'manager', 'type', 'category', 'phase', 'currency'];
-      commonFields.forEach(field => {
-        if (lowerMessage.includes(field)) {
+      // Look for "for [field]" patterns (e.g., "graph for name")
+      const forMatch = lowerMessage.match(/for\s+(\w+)/g);
+      if (forMatch) {
+        forMatch.forEach(match => {
+          const field = match.replace(/^for\s+/, '');
           requestedFields.push(field);
-        }
-      });
+        });
+      }
+      
+      // Look for "of [field]" patterns (e.g., "distribution of status")
+      const ofMatch = lowerMessage.match(/of\s+(\w+)/g);
+      if (ofMatch) {
+        ofMatch.forEach(match => {
+          const field = match.replace(/^of\s+/, '');
+          if (!['projects', 'tasks', 'resources', 'project', 'task'].includes(field)) {
+            requestedFields.push(field);
+          }
+        });
+      }
       
       console.log('[Analytics] Extracted requested fields from query:', requestedFields);
     }
@@ -1650,16 +1586,60 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
       requestedFields.length > 0 ? requestedFields : undefined
     );
     
-    const fieldCount = vizData.groupableFields.length;
-    const fieldList = vizData.groupableFields
+    // FILTER: If user requested specific fields, only return those
+    let filteredChartData = vizData.chartData;
+    let filteredGroupableFields = vizData.groupableFields;
+    let filteredFieldMetadata = vizData.fieldMetadata;
+    
+    if (requestedFields.length > 0) {
+      console.log('[Analytics] Filtering to user-requested fields only');
+      
+      filteredGroupableFields = vizData.groupableFields.filter(fieldName => {
+        const fieldNameLower = fieldName.toLowerCase();
+        const displayNameLower = vizData.fieldMetadata[fieldName]?.displayName?.toLowerCase() || '';
+        
+        return requestedFields.some(rf => {
+          const rfLower = rf.toLowerCase();
+          return fieldNameLower.includes(rfLower) || 
+                 displayNameLower.includes(rfLower) ||
+                 rfLower.includes(fieldNameLower);
+        });
+      });
+      
+      // If filtering resulted in fields, use filtered list
+      if (filteredGroupableFields.length > 0) {
+        const newChartData: Record<string, any> = {};
+        const newFieldMetadata: Record<string, any> = {};
+        
+        filteredGroupableFields.forEach(fieldName => {
+          newChartData[fieldName] = vizData.chartData[fieldName];
+          newFieldMetadata[fieldName] = vizData.fieldMetadata[fieldName];
+        });
+        
+        filteredChartData = newChartData;
+        filteredFieldMetadata = newFieldMetadata;
+        
+        console.log('[Analytics] Filtered to:', filteredGroupableFields);
+      } else {
+        // No matches found, return all fields
+        console.log('[Analytics] No matching fields found, returning all');
+      }
+    }
+    
+    const fieldCount = filteredGroupableFields.length;
+    const fieldList = filteredGroupableFields
       .slice(0, 5)
-      .map(f => vizData.fieldMetadata[f]?.displayName || f)
+      .map(f => filteredFieldMetadata[f]?.displayName || f)
       .join(', ');
     const more = fieldCount > 5 ? ` and ${fieldCount - 5} more` : '';
     
     return {
       reply: `📊 **${displayLabel} Analytics** (${count} records)\n\n✨ ${fieldCount} visualizations available: ${fieldList}${more}`,
-      chartData: vizData
+      chartData: {
+        groupableFields: filteredGroupableFields,
+        chartData: filteredChartData,
+        fieldMetadata: filteredFieldMetadata
+      }
     };
   }
   
@@ -1831,7 +1811,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.6.1-isgroupable-support',
+    version: '4.7.0-specific-field-focus',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1962,7 +1942,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM isGroupable Support Server v4.6.1');
+  console.log('🚀 Clarity PPM Specific Field Focus Server v4.7.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1973,9 +1953,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('🎯 Respects Clarity isGroupable Flag!');
-  console.log('✨ Uses isGroupable=true from metadata');
-  console.log('📊 Processes data fields + metadata fields');
-  console.log('🔍 Better lookup detection');
+  console.log('🎯 AI returns ONLY the field you ask for!');
+  console.log('✨ Works with ALL lookup fields');
+  console.log('📊 Better query understanding');
+  console.log('🔍 "graph for name" → only name chart');
   console.log('======================================================================');
 });
