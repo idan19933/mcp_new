@@ -1,11 +1,12 @@
 /**
- * Clarity PPM HTTP Server v4.5.0 - Smart Field Detection Edition
+ * Clarity PPM HTTP Server v4.5.1 - Smart Field Detection Edition (BUILD FIX)
  * - Detects fields explicitly requested by user (e.g., "by blueprint")
  * - Forces inclusion of requested fields even if normally filtered
  * - Enhanced logging shows why each field is included/excluded
  * - Better AI prompting for specific field distribution requests
  * - Handles edge cases: single value fields when explicitly requested
  * - Lookup fields get priority even with many unique values
+ * - FIXED: Pass userMessage to formatResponse function
  */
 
 import express, { Request, Response } from 'express';
@@ -1440,7 +1441,7 @@ async function executePlan(plan: any): Promise<any> {
 // FORMAT RESPONSE - ENHANCED FOR VISUAL ANALYTICS WITH LOOKUP SUPPORT
 // ============================================================================
 
-async function formatResponse(execution: any): Promise<any> {
+async function formatResponse(execution: any, userMessage?: string): Promise<any> {
   // FIXED: Handle greeting responses
   if (execution.plan?.intent === 'greeting' || 
       (!execution.results || execution.results.length === 0)) {
@@ -1504,26 +1505,28 @@ async function formatResponse(execution: any): Promise<any> {
     
     // Extract requested fields from user message
     const requestedFields: string[] = [];
-    const lowerMessage = userMessage.toLowerCase();
-    
-    // Look for "by [field]" patterns
-    const byMatch = lowerMessage.match(/by\s+(\w+)/g);
-    if (byMatch) {
-      byMatch.forEach(match => {
-        const field = match.replace(/^by\s+/, '');
-        requestedFields.push(field);
-      });
-    }
-    
-    // Look for common field names in the message
-    const commonFields = ['blueprint', 'status', 'priority', 'manager', 'type', 'category', 'phase', 'currency'];
-    commonFields.forEach(field => {
-      if (lowerMessage.includes(field)) {
-        requestedFields.push(field);
+    if (userMessage) {
+      const lowerMessage = userMessage.toLowerCase();
+      
+      // Look for "by [field]" patterns
+      const byMatch = lowerMessage.match(/by\s+(\w+)/g);
+      if (byMatch) {
+        byMatch.forEach(match => {
+          const field = match.replace(/^by\s+/, '');
+          requestedFields.push(field);
+        });
       }
-    });
-    
-    console.log('[Analytics] Extracted requested fields from query:', requestedFields);
+      
+      // Look for common field names in the message
+      const commonFields = ['blueprint', 'status', 'priority', 'manager', 'type', 'category', 'phase', 'currency'];
+      commonFields.forEach(field => {
+        if (lowerMessage.includes(field)) {
+          requestedFields.push(field);
+        }
+      });
+      
+      console.log('[Analytics] Extracted requested fields from query:', requestedFields);
+    }
     
     // Prepare visualization data with lookup resolution
     const vizData = await prepareVisualizationData(
@@ -1713,7 +1716,7 @@ async function formatResponse(execution: any): Promise<any> {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.5.0-smart-field-detection',
+    version: '4.5.1-build-fix',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1813,7 +1816,7 @@ app.post('/api/chat', async (req, res) => {
     
     const execution = await executePlan(plan);
     
-    const response = await formatResponse(execution);
+    const response = await formatResponse(execution, message);
     
     const lastResult = (execution.results && execution.results.length > 0)
       ? execution.results[execution.results.length - 1]?.result
@@ -1844,7 +1847,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Smart Field Detection Server v4.5.0');
+  console.log('🚀 Clarity PPM Smart Field Detection Server v4.5.1 (BUILD FIX)');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
