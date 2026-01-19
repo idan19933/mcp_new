@@ -1,13 +1,11 @@
 /**
- * Clarity PPM HTTP Server v4.4.1 - Comprehensive Grouping Edition (BUILD FIX)
- * - Automatically analyzes ALL lookup fields from describeAttributes
- * - Creates visualizations for every groupable field with data
- * - Intelligent field filtering (skips dates, IDs, text fields)
- * - Uses embedded lookup values from metadata when available
- * - Falls back to /lookupValues API for complete data
- * - Handles Clarity's lookup format: {displayValue, _type: "lookup", id}
- * - Smart detection of interesting fields (2-100 unique values)
- * - FIXED: Added extendedType to AttributeMetadata interface
+ * Clarity PPM HTTP Server v4.5.0 - Smart Field Detection Edition
+ * - Detects fields explicitly requested by user (e.g., "by blueprint")
+ * - Forces inclusion of requested fields even if normally filtered
+ * - Enhanced logging shows why each field is included/excluded
+ * - Better AI prompting for specific field distribution requests
+ * - Handles edge cases: single value fields when explicitly requested
+ * - Lookup fields get priority even with many unique values
  */
 
 import express, { Request, Response } from 'express';
@@ -498,11 +496,16 @@ interface VisualizationResult {
 
 async function prepareVisualizationData(
   data: any[],
-  metadata: ObjectMetadata
+  metadata: ObjectMetadata,
+  requestedFields?: string[]  // NEW: Fields explicitly requested by user
 ): Promise<VisualizationResult> {
   
   console.log('[Visualization] Preparing comprehensive chart data...');
   console.log(`[Visualization] Processing ${data.length} records with ${metadata.attributes.length} attributes`);
+  
+  if (requestedFields && requestedFields.length > 0) {
+    console.log(`[Visualization] User requested specific fields: ${requestedFields.join(', ')}`);
+  }
   
   const chartData: Record<string, ChartDataPoint[]> = {};
   const groupableFields: string[] = [];
@@ -510,16 +513,27 @@ async function prepareVisualizationData(
   
   // Process each attribute to find groupable fields
   for (const attr of metadata.attributes) {
-    // Skip non-groupable fields
-    if (attr.dataType === 'clob' || 
-        attr.dataType === 'attachment' || 
-        attr.dataType === 'tsv' ||
-        attr.dataType === 'date' ||
-        attr.dataType === 'money' ||
-        attr.apiName.startsWith('_') ||
-        attr.actionType === 'filterOnly' ||
-        attr.actionType === 'dataOnly') {
-      continue;
+    const fieldName = attr.apiName;
+    
+    // Check if this field was explicitly requested
+    const explicitlyRequested = requestedFields && requestedFields.some(rf => 
+      fieldName.toLowerCase().includes(rf.toLowerCase()) || 
+      attr.displayName.toLowerCase().includes(rf.toLowerCase())
+    );
+    
+    // Skip non-groupable fields (unless explicitly requested)
+    if (!explicitlyRequested) {
+      if (attr.dataType === 'clob' || 
+          attr.dataType === 'attachment' || 
+          attr.dataType === 'tsv' ||
+          attr.dataType === 'date' ||
+          attr.dataType === 'money' ||
+          attr.apiName.startsWith('_') ||
+          attr.actionType === 'filterOnly' ||
+          attr.actionType === 'dataOnly') {
+        console.log(`[Visualization] Skipping ${fieldName}: non-groupable type (${attr.dataType})`);
+        continue;
+      }
     }
     
     // Check if this field has data in the records
@@ -552,18 +566,25 @@ async function prepareVisualizationData(
       }
     }
     
-    // Skip if no data or only one unique value (not interesting for grouping)
-    if (!hasData || sampleValues.size < 2) {
+    // Skip if no data
+    if (!hasData) {
+      console.log(`[Visualization] Skipping ${fieldName}: no data in records`);
       continue;
     }
     
-    // Skip if too many unique values (likely IDs or text fields)
-    if (sampleValues.size > 100) {
-      console.log(`[Visualization] Skipping ${attr.apiName}: too many unique values (${sampleValues.size})`);
+    // Skip if only one unique value (unless explicitly requested)
+    if (sampleValues.size < 2 && !explicitlyRequested) {
+      console.log(`[Visualization] Skipping ${fieldName}: only ${sampleValues.size} unique value(s)`);
       continue;
     }
     
-    console.log(`[Visualization] Found groupable field: ${attr.apiName} (${attr.dataType}, ${sampleValues.size} unique values)`);
+    // Skip if too many unique values (unless explicitly requested or it's a lookup)
+    if (sampleValues.size > 100 && !explicitlyRequested && !attr.isLookup) {
+      console.log(`[Visualization] Skipping ${fieldName}: too many unique values (${sampleValues.size})`);
+      continue;
+    }
+    
+    console.log(`[Visualization] ✓ Found groupable field: ${fieldName} (${attr.dataType}, ${sampleValues.size} unique values)${explicitlyRequested ? ' [USER REQUESTED]' : ''}`);
     
     groupableFields.push(attr.apiName);
     fieldMetadata[attr.apiName] = {
@@ -949,18 +970,27 @@ If the user says ONLY a greeting like "hi", "hello", "hey" with NO other questio
   "intent": "greeting"
 }
 
+**IMPORTANT - SPECIFIC FIELD REQUESTS:**
+When the user asks for distribution/breakdown/grouping BY a specific field, ALWAYS include that field in the fields list.
+Examples:
+- "distribution by blueprint" → include "blueprintId" or "blueprint" in fields
+- "group by manager" → include "manager" in fields  
+- "breakdown by status" → include "status" in fields
+- "analyze by priority" → include "priority" in fields
+
 **YOUR PROCESS:**
 1. Analyze the user's natural language request
 2. If it's JUST a greeting → return empty steps with "greeting" intent
 3. Identify the Clarity objects involved (projects, tasks, resources, etc.)
-4. Determine what operation is needed (count, list, get, create, update)
-5. Extract any filters or conditions
-6. Return a structured execution plan
+4. **If user asks for distribution/grouping BY a specific field, make sure to include that field**
+5. Determine what operation is needed (count, list, get, create, update)
+6. Extract any filters or conditions
+7. Return a structured execution plan
 
 **VISUAL ANALYTICS:**
 When users ask for distributions, analytics, breakdowns, or groupings:
 - ALWAYS use "list" operation to get full data (not count)
-- Include the grouping field (status, percentComplete, priority, type, category)
+- Include the grouping field that the user asked for (blueprint, status, priority, manager, etc.)
 - Set limit high enough to get complete picture (500 for distributions)
 - The frontend will automatically create charts for data with groupable fields
 
@@ -993,7 +1023,7 @@ OBA: obaTasks, obaInvestments, obaStaffs, obaTodos
       "operation": "count|list|get|create|update|delete",
       "objectType": "projects",
       "filters": { "isActive": true, "status": "APPROVED" },
-      "fields": ["name", "code", "manager"],
+      "fields": ["name", "code", "manager", "blueprint"],
       "limit": 50
     }
   ],
@@ -1026,6 +1056,45 @@ A: {
     }
   ],
   "intent": "list_projects_by_manager"
+}
+
+Q: "Create distribution of projects by blueprint"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "fields": ["name", "blueprintId", "blueprint", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "project_blueprint_distribution_visual"
+}
+
+Q: "Show distribution by manager"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "fields": ["name", "manager", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "project_manager_distribution_visual"
+}
+
+Q: "Group projects by status"
+A: {
+  "steps": [
+    {
+      "operation": "list",
+      "objectType": "projects",
+      "fields": ["name", "status", "_internalId"],
+      "limit": 500
+    }
+  ],
+  "intent": "project_status_grouping_visual"
 }
 
 Q: "Show task status distribution for project Alpha"
@@ -1144,12 +1213,13 @@ A: {
 
 **IMPORTANT RULES:**
 1. For "distribution", "breakdown", "analyze" queries - Use LIST operation with limit=500
-2. Include groupable fields: status, percentComplete, priority, type, category
-3. For "how many" queries - Use COUNT operation
-4. For parent-child queries - Use TWO steps with parentId: "STEP_1_ID"
-5. Always include _internalId in field selection
-6. For CREATE/UPDATE - Use "data" field with required attributes
-7. Visual analytics keywords: distribution, breakdown, analyze, show breakdown, group by
+2. **When user asks for distribution BY a field, INCLUDE that field in the fields list**
+3. Include groupable fields: status, percentComplete, priority, type, category, blueprint, manager
+4. For "how many" queries - Use COUNT operation
+5. For parent-child queries - Use TWO steps with parentId: "STEP_1_ID"
+6. Always include _internalId in field selection
+7. For CREATE/UPDATE - Use "data" field with required attributes
+8. Visual analytics keywords: distribution, breakdown, analyze, show breakdown, group by
 
 User Query: "${message}"
 
@@ -1432,10 +1502,34 @@ async function formatResponse(execution: any): Promise<any> {
   if (isVisualAnalytics && finalResult.result._results && finalResult.result._results.length > 0 && finalResult.metadata) {
     const displayLabel = await getObjectLabel(actualType);
     
+    // Extract requested fields from user message
+    const requestedFields: string[] = [];
+    const lowerMessage = userMessage.toLowerCase();
+    
+    // Look for "by [field]" patterns
+    const byMatch = lowerMessage.match(/by\s+(\w+)/g);
+    if (byMatch) {
+      byMatch.forEach(match => {
+        const field = match.replace(/^by\s+/, '');
+        requestedFields.push(field);
+      });
+    }
+    
+    // Look for common field names in the message
+    const commonFields = ['blueprint', 'status', 'priority', 'manager', 'type', 'category', 'phase', 'currency'];
+    commonFields.forEach(field => {
+      if (lowerMessage.includes(field)) {
+        requestedFields.push(field);
+      }
+    });
+    
+    console.log('[Analytics] Extracted requested fields from query:', requestedFields);
+    
     // Prepare visualization data with lookup resolution
     const vizData = await prepareVisualizationData(
       finalResult.result._results,
-      finalResult.metadata
+      finalResult.metadata,
+      requestedFields.length > 0 ? requestedFields : undefined
     );
     
     const fieldCount = vizData.groupableFields.length;
@@ -1619,7 +1713,7 @@ async function formatResponse(execution: any): Promise<any> {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.4.1-build-fix',
+    version: '4.5.0-smart-field-detection',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1750,7 +1844,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Comprehensive Grouping Server v4.4.1 (BUILD FIX)');
+  console.log('🚀 Clarity PPM Smart Field Detection Server v4.5.0');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1761,9 +1855,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('📊 Comprehensive Grouping Enabled!');
-  console.log('✨ Analyzes ALL lookup fields automatically');
-  console.log('🎯 Creates visualizations for every groupable field');
-  console.log('🔍 Smart filtering: 2-100 unique values');
+  console.log('📊 Smart Field Detection!');
+  console.log('✨ Detects fields from "by [field]" patterns in user queries');
+  console.log('🎯 Forces inclusion of explicitly requested fields');
+  console.log('🔍 Enhanced logging for debugging field selection');
   console.log('======================================================================');
 });
