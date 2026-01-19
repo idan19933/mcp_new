@@ -1,9 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.9.0 - Hebrew Field Support
- * - Removed strict field validation - tries all fields
- * - AI gets list of available fields with Hebrew names
- * - Can match Hebrew field names to API names
- * - Better handling of fields not in metadata
+ * Clarity PPM HTTP Server v4.9.1 - Extract Fields from AI Plan
+ * - CRITICAL FIX: Extract requested fields from AI plan, not user message
+ * - Fixes Hebrew/Unicode field name detection
+ * - Fields marked as explicitly requested even with 1 unique value
+ * - Shows charts even when all records have same value
  */
 
 import express, { Request, Response } from 'express';
@@ -1569,41 +1569,13 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
   if (isVisualAnalytics && finalResult.result._results && finalResult.result._results.length > 0 && finalResult.metadata) {
     const displayLabel = await getObjectLabel(actualType);
     
-    // Extract requested fields from user message
+    // Extract requested fields from the AI's execution plan (more reliable than parsing user message)
     const requestedFields: string[] = [];
-    if (userMessage) {
-      const lowerMessage = userMessage.toLowerCase();
-      
-      // Look for "by [field]" patterns
-      const byMatch = lowerMessage.match(/by\s+(\w+)/g);
-      if (byMatch) {
-        byMatch.forEach(match => {
-          const field = match.replace(/^by\s+/, '');
-          requestedFields.push(field);
-        });
-      }
-      
-      // Look for "for [field]" patterns (e.g., "graph for name")
-      const forMatch = lowerMessage.match(/for\s+(\w+)/g);
-      if (forMatch) {
-        forMatch.forEach(match => {
-          const field = match.replace(/^for\s+/, '');
-          requestedFields.push(field);
-        });
-      }
-      
-      // Look for "of [field]" patterns (e.g., "distribution of status")
-      const ofMatch = lowerMessage.match(/of\s+(\w+)/g);
-      if (ofMatch) {
-        ofMatch.forEach(match => {
-          const field = match.replace(/^of\s+/, '');
-          if (!['projects', 'tasks', 'resources', 'project', 'task'].includes(field)) {
-            requestedFields.push(field);
-          }
-        });
-      }
-      
-      console.log('[Analytics] Extracted requested fields from query:', requestedFields);
+    if (executionResult.plan?.steps?.[0]?.fields) {
+      const planFields = executionResult.plan.steps[0].fields;
+      // Exclude _internalId and _self
+      requestedFields.push(...planFields.filter((f: string) => f !== '_internalId' && f !== '_self'));
+      console.log('[Analytics] Extracted requested fields from AI plan:', requestedFields);
     }
     
     // Prepare visualization data with lookup resolution
@@ -1838,7 +1810,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.9.0-hebrew-field-support',
+    version: '4.9.1-extract-from-ai-plan',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1969,7 +1941,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Hebrew Field Support v4.9.0');
+  console.log('🚀 Clarity PPM Extract Fields from AI Plan v4.9.1');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1980,9 +1952,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('🌍 Hebrew/Unicode field names supported!');
-  console.log('🎯 AI sees available fields with display names');
-  console.log('✅ No strict field validation');
-  console.log('📊 Works with any groupable field');
+  console.log('🎯 CRITICAL FIX: Extracts fields from AI plan!');
+  console.log('🌍 Hebrew fields now explicitly requested');
+  console.log('📊 Shows charts even with 1 unique value');
+  console.log('✅ Works with any language');
   console.log('======================================================================');
 });
