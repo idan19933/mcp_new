@@ -1,12 +1,9 @@
 /**
- * Clarity PPM HTTP Server v4.5.1 - Smart Field Detection Edition (BUILD FIX)
- * - Detects fields explicitly requested by user (e.g., "by blueprint")
- * - Forces inclusion of requested fields even if normally filtered
- * - Enhanced logging shows why each field is included/excluded
- * - Better AI prompting for specific field distribution requests
- * - Handles edge cases: single value fields when explicitly requested
- * - Lookup fields get priority even with many unique values
- * - FIXED: Pass userMessage to formatResponse function
+ * Clarity PPM HTTP Server v4.5.2 - Enhanced Debugging Edition
+ * - Added detailed logging for manager field detection
+ * - Summary report showing which fields were included
+ * - Debug output for explicitly requested fields
+ * - Helps diagnose why fields are being skipped
  */
 
 import express, { Request, Response } from 'express';
@@ -516,6 +513,16 @@ async function prepareVisualizationData(
   for (const attr of metadata.attributes) {
     const fieldName = attr.apiName;
     
+    // SPECIAL DEBUG: Log manager field details
+    if (fieldName === 'manager' || fieldName.toLowerCase().includes('manager')) {
+      console.log(`[Visualization] 🔍 MANAGER FIELD DEBUG: ${fieldName}`);
+      console.log(`  - dataType: ${attr.dataType}`);
+      console.log(`  - isLookup: ${attr.isLookup}`);
+      console.log(`  - lookupCode: ${attr.lookupCode}`);
+      console.log(`  - displayName: ${attr.displayName}`);
+      console.log(`  - Sample data from first record:`, data[0]?.[fieldName]);
+    }
+    
     // Check if this field was explicitly requested
     const explicitlyRequested = requestedFields && requestedFields.some(rf => 
       fieldName.toLowerCase().includes(rf.toLowerCase()) || 
@@ -692,7 +699,10 @@ async function prepareVisualizationData(
     console.log(`[Visualization] ${attr.apiName} (${attr.displayName}): ${chartPoints.length} categories - ${topValues}`);
   }
   
-  console.log(`[Visualization] Created ${groupableFields.length} chart visualizations`);
+  console.log(`[Visualization] ========================================`);
+  console.log(`[Visualization] SUMMARY: Created ${groupableFields.length} chart visualizations`);
+  console.log(`[Visualization] Fields included: ${groupableFields.join(', ')}`);
+  console.log(`[Visualization] ========================================`);
   
   return { groupableFields, chartData, fieldMetadata };
 }
@@ -1716,7 +1726,7 @@ async function formatResponse(execution: any, userMessage?: string): Promise<any
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    version: '4.5.1-build-fix',
+    version: '4.5.2-enhanced-debugging',
     config: {
       baseUrl: config.baseUrl,
       hasAuth: !!(config.username || config.sessionId || config.authToken),
@@ -1847,7 +1857,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log('======================================================================');
-  console.log('🚀 Clarity PPM Smart Field Detection Server v4.5.1 (BUILD FIX)');
+  console.log('🚀 Clarity PPM Enhanced Debugging Server v4.5.2');
   console.log(`📡 Listening on port ${PORT}`);
   console.log(`🔗 Base URL: ${config.baseUrl}`);
   console.log(`🔐 Auth: ${config.username ? 'Basic' : config.sessionId ? 'Session' : config.authToken ? 'Token' : 'None'}`);
@@ -1858,9 +1868,9 @@ app.listen(PORT, () => {
   console.log(`Metadata: GET http://localhost:${PORT}/api/metadata/:objectName`);
   console.log(`Chat: POST http://localhost:${PORT}/api/chat`);
   console.log('======================================================================');
-  console.log('📊 Smart Field Detection!');
-  console.log('✨ Detects fields from "by [field]" patterns in user queries');
-  console.log('🎯 Forces inclusion of explicitly requested fields');
-  console.log('🔍 Enhanced logging for debugging field selection');
+  console.log('🔍 Enhanced Debugging Mode!');
+  console.log('✨ Detailed logging for field detection');
+  console.log('🎯 Special debug output for manager field');
+  console.log('📊 Summary report of included fields');
   console.log('======================================================================');
 });
